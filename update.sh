@@ -1,36 +1,110 @@
 #!/usr/bin/env bash
 set -euo pipefail
-INSTALL_DIR="${INSTALL_DIR:-/opt/custom-amp/custom-amp-ubuntu-panel}"
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-info(){ printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
-fail(){ printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"; exit 1; }
-[[ "${EUID}" -ne 0 ]] || fail "Do not run this script as root. Run it as your normal sudo user."
-if ! command -v rsync >/dev/null 2>&1; then sudo apt update; sudo apt install -y rsync; fi
+APP_DIR="/opt/custom-amp/custom-amp-ubuntu-panel"
+REPO_URL=""
+BRANCH="main"
 
-info "Updating files in $INSTALL_DIR without changing config or panel data..."
-sudo mkdir -p "$INSTALL_DIR"
-sudo rsync -a --delete \
-  --exclude '.git' \
-  --exclude 'panel/.env' \
-  --exclude 'agent/.env' \
-  --exclude 'panel/data' \
-  --exclude 'node_modules' \
-  "$SRC_DIR/" "$INSTALL_DIR/"
-sudo chown -R "$USER:$USER" "$INSTALL_DIR"
+PANEL_SERVICE="custom-amp-panel"
+AGENT_SERVICE="custom-amp-agent"
 
-if [[ -d "$INSTALL_DIR/panel" ]]; then
-  info "Updating panel dependencies..."
-  cd "$INSTALL_DIR/panel"
-  npm install
-fi
-if [[ -d "$INSTALL_DIR/agent" ]]; then
-  info "Updating agent dependencies..."
-  cd "$INSTALL_DIR/agent"
-  npm install
+if [ -f "$APP_DIR/.env.update" ]; then
+  source "$APP_DIR/.env.update"
 fi
 
-sudo systemctl daemon-reload || true
-sudo systemctl restart custom-amp-panel || true
-sudo systemctl restart custom-amp-agent || true
-info "Update complete. Config, tokens, users, nodes, and servers were preserved."
+if [ -z "${REPO_URL}" ]; then
+  if [ -d "$APP_DIR/.git" ]; then
+    REPO_URL="$(git -C "$APP_DIR" config --get remote.origin.url || true)"
+  fi
+fi
+
+if [ -z "${REPO_URL}" ]; then
+  echo "ERROR: REPO_URL is not set."
+  echo "Create this file:"
+  echo "$APP_DIR/.env.update"
+  echo ""
+  echo "Put this inside:"
+  echo "REPO_URL=https://github.com/sootypage/test.git"
+  echo "BRANCH=main"
+  exit 1
+fi
+
+echo "[INFO] Updating from: $REPO_URL"
+echo "[INFO] Branch: $BRANCH"
+
+sudo apt update
+sudo apt install -y git rsync
+
+sudo mkdir -p /opt/custom-amp
+
+if [ ! -d "$APP_DIR/.git" ]; then
+  echo "[INFO] Current install is not a git repo. Updating safely from GitHub..."
+
+  TMP_CLONE="/tmp/custom-amp-update-$(date +%s)"
+  git clone --branch "$BRANCH" "$REPO_URL" "$TMP_CLONE"
+
+  echo "[INFO] Preserving configs and data..."
+
+  [ -f "$APP_DIR/panel/.env" ] && cp "$APP_DIR/panel/.env" /tmp/custom-amp-panel.env
+  [ -f "$APP_DIR/agent/.env" ] && cp "$APP_DIR/agent/.env" /tmp/custom-amp-agent.env
+  [ -f "$APP_DIR/.env.update" ] && cp "$APP_DIR/.env.update" /tmp/custom-amp-update.env
+
+  sudo rsync -a --delete \
+    --exclude "panel/.env" \
+    --exclude "agent/.env" \
+    --exclude "panel/data/" \
+    --exclude "panel/node_modules/" \
+    --exclude "agent/node_modules/" \
+    --exclude ".env.update" \
+    "$TMP_CLONE/" "$APP_DIR/"
+
+  [ -f /tmp/custom-amp-panel.env ] && sudo mv /tmp/custom-amp-panel.env "$APP_DIR/panel/.env"
+  [ -f /tmp/custom-amp-agent.env ] && sudo mv /tmp/custom-amp-agent.env "$APP_DIR/agent/.env"
+  [ -f /tmp/custom-amp-update.env ] && sudo mv /tmp/custom-amp-update.env "$APP_DIR/.env.update"
+
+  rm -rf "$TMP_CLONE"
+else
+  echo "[INFO] Git repo found. Resetting code to match GitHub..."
+
+  cd "$APP_DIR"
+
+  git remote set-url origin "$REPO_URL"
+  git fetch origin "$BRANCH"
+
+  [ -f panel/.env ] && cp panel/.env /tmp/custom-amp-panel.env
+  [ -f agent/.env ] && cp agent/.env /tmp/custom-amp-agent.env
+  [ -f .env.update ] && cp .env.update /tmp/custom-amp-update.env
+
+  git reset --hard "origin/$BRANCH"
+
+  [ -f /tmp/custom-amp-panel.env ] && mv /tmp/custom-amp-panel.env panel/.env
+  [ -f /tmp/custom-amp-agent.env ] && mv /tmp/custom-amp-agent.env agent/.env
+  [ -f /tmp/custom-amp-update.env ] && mv /tmp/custom-amp-update.env .env.update
+fi
+
+cd "$APP_DIR"
+chmod +x install-ubuntu.sh update.sh 2>/dev/null || true
+
+if [ -d panel ]; then
+  echo "[INFO] Installing panel dependencies..."
+  cd "$APP_DIR/panel"
+  npm install --omit=dev
+fi
+
+if [ -d agent ]; then
+  echo "[INFO] Installing agent dependencies..."
+  cd "$APP_DIR/agent"
+  npm install --omit=dev
+fi
+
+echo "[INFO] Restarting services..."
+
+if systemctl list-unit-files | grep -q "^${PANEL_SERVICE}.service"; then
+  sudo systemctl restart "$PANEL_SERVICE"
+fi
+
+if systemctl list-unit-files | grep -q "^${AGENT_SERVICE}.service"; then
+  sudo systemctl restart "$AGENT_SERVICE"
+fi
+
+echo "[DONE] Updated code from GitHub without deleting servers, backups, configs, nodes, or panel data."
