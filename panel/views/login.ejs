@@ -1,0 +1,14 @@
+<%- include('layout-top', { title }) %>
+<section class="card narrow">
+  <h1>Login</h1>
+  <p class="muted">Sign in to manage your Ubuntu game servers.</p>
+  <form method="post" action="/login" class="form">
+    <label>Email</label>
+    <input name="email" type="email" required placeholder="admin@example.com">
+    <label>Password</label>
+    <input name="password" type="password" required placeholder="Password">
+    <button class="primary">Login</button>
+  </form>
+  <p class="muted small">Default admin comes from <code>ADMIN_EMAIL</code> and <code>ADMIN_PASSWORD</code> in the panel .env file.</p>
+</section>
+<%- include('layout-bottom') %>

@@ -1,0 +1,14 @@
+[Unit]
+Description=Custom AMP Panel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/custom-amp/custom-amp-ubuntu-panel/panel
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

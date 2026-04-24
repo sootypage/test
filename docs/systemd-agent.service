@@ -1,0 +1,15 @@
+[Unit]
+Description=Custom AMP Ubuntu Agent
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/custom-amp/custom-amp-ubuntu-panel/agent
+ExecStart=/usr/bin/node agent.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

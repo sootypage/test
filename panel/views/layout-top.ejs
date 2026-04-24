@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= title %> - <%= brand %></title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/dashboard"><%= brand %></a>
+  <nav>
+    <% if (user) { %>
+      <a href="/dashboard">Dashboard</a>
+      <% if (user.role === 'admin') { %><a href="/admin">Admin</a><% } %>
+      <form method="post" action="/logout" class="inline"><button>Logout</button></form>
+    <% } %>
+  </nav>
+</header>
+<main class="container">
+  <% if (flash.error && flash.error.length) { %><div class="alert error"><%= flash.error[0] %></div><% } %>
+  <% if (flash.success && flash.success.length) { %><div class="alert success"><%= flash.success[0] %></div><% } %>

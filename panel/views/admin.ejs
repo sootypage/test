@@ -1,0 +1,67 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1>Admin</h1>
+    <p>Add Ubuntu nodes, users, and servers.</p>
+  </div>
+</section>
+
+<section class="admin-grid">
+  <div class="card">
+    <h2>Add Ubuntu node</h2>
+    <form method="post" action="/admin/nodes" class="form">
+      <label>Name</label><input name="name" required placeholder="Sydney Node 1">
+      <label>Agent URL</label><input name="url" required placeholder="http://1.2.3.4:4100">
+      <label>Location</label><input name="location" placeholder="Australia">
+      <button class="primary">Add node</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Create user</h2>
+    <form method="post" action="/admin/users" class="form">
+      <label>Name</label><input name="name" placeholder="User name">
+      <label>Email</label><input name="email" type="email" required>
+      <label>Password</label><input name="password" type="text" required>
+      <label>Role</label>
+      <select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+      <button class="primary">Create user</button>
+    </form>
+  </div>
+
+  <div class="card wide">
+    <h2>Create Minecraft Paper server</h2>
+    <form method="post" action="/admin/servers" class="form two-col">
+      <label>Server name</label><input name="name" required placeholder="survival-1">
+      <label>Owner</label>
+      <select name="ownerId" required>
+        <% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %>
+      </select>
+      <label>Node</label>
+      <select name="nodeId" required>
+        <% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %>
+      </select>
+      <label>Game</label><input name="game" value="minecraft-paper">
+      <label>Docker image</label><input name="image" value="itzg/minecraft-server:java21">
+      <label>Minecraft version</label><input name="version" value="LATEST">
+      <label>Memory MB</label><input name="memoryMb" type="number" value="2048">
+      <label>Public port</label><input name="port" type="number" value="25565">
+      <button class="primary span">Create server</button>
+    </form>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Nodes</h2>
+  <table><thead><tr><th>Name</th><th>URL</th><th>Location</th></tr></thead><tbody>
+    <% db.nodes.forEach(n => { %><tr><td><%= n.name %></td><td><%= n.url %></td><td><%= n.location %></td></tr><% }) %>
+  </tbody></table>
+</section>
+
+<section class="card">
+  <h2>Users</h2>
+  <table><thead><tr><th>Email</th><th>Name</th><th>Role</th></tr></thead><tbody>
+    <% db.users.forEach(u => { %><tr><td><%= u.email %></td><td><%= u.name %></td><td><%= u.role %></td></tr><% }) %>
+  </tbody></table>
+</section>
+<%- include('layout-bottom') %>

@@ -1,0 +1,38 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1><%= server.name %></h1>
+    <p><%= server.game %> on <%= node ? node.name : 'Unknown node' %></p>
+  </div>
+  <div class="status <%= live && live.state && live.state.Running ? 'online' : 'offline' %>">
+    <%= live && live.state && live.state.Running ? 'Online' : 'Offline' %>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Power controls</h2>
+  <form method="post" action="/servers/<%= server.id %>/action" class="button-row">
+    <button name="action" value="start" class="primary">Start</button>
+    <button name="action" value="restart">Restart</button>
+    <button name="action" value="stop" class="danger">Stop</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Console command</h2>
+  <form method="post" action="/servers/<%= server.id %>/command" class="command-form">
+    <input name="command" placeholder="say hello from the panel" required>
+    <button>Send</button>
+  </form>
+  <p class="muted small">Minecraft commands use Docker <code>rcon-cli</code>. Enable RCON in the container env for best results.</p>
+</section>
+
+<section class="card">
+  <h2>Console logs</h2>
+  <% if (live && live.error) { %>
+    <pre class="console"><%= live.error %></pre>
+  <% } else { %>
+    <pre class="console"><%= live && live.logs ? live.logs : 'No logs yet.' %></pre>
+  <% } %>
+</section>
+<%- include('layout-bottom') %>

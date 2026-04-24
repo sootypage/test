@@ -1,0 +1,26 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1>Dashboard</h1>
+    <p>Manage your servers, view status, and open each console.</p>
+  </div>
+  <div class="stat"><strong><%= servers.length %></strong><span>Servers</span></div>
+</section>
+
+<section class="grid">
+  <% if (!servers.length) { %>
+    <div class="card"><h2>No servers yet</h2><p class="muted">Ask an admin to create a server for your account.</p></div>
+  <% } %>
+  <% servers.forEach(server => { const node = nodes.find(n => n.id === server.nodeId); %>
+    <a class="card server-card" href="/servers/<%= server.id %>">
+      <h2><%= server.name %></h2>
+      <p><%= server.game %></p>
+      <div class="chips">
+        <span><%= server.memoryMb %> MB</span>
+        <span>Port <%= server.port %></span>
+        <span><%= node ? node.name : 'Unknown node' %></span>
+      </div>
+    </a>
+  <% }) %>
+</section>
+<%- include('layout-bottom') %>
