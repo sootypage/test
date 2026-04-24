@@ -289,3 +289,23 @@ The updater does not replace:
 - `agent/.env`
 - `panel/data`
 
+
+## Cloudflare subdomain automation
+
+Add these to `panel/.env` to let the panel create DNS records automatically:
+
+```env
+CLOUDFLARE_API_TOKEN=your_cloudflare_api_token
+CLOUDFLARE_ZONE_ID=your_zone_id
+CLOUDFLARE_ROOT_DOMAIN=example.com
+CLOUDFLARE_PROXIED=false
+```
+
+Security notes:
+- Use a Cloudflare API token, not your global API key.
+- Limit the token to one zone only.
+- Give it `Zone:DNS Edit` permission only.
+- Keep `CLOUDFLARE_PROXIED=false` for Minecraft Java unless you use Cloudflare Spectrum.
+- The token is stored only in `panel/.env` and is never displayed in the panel UI.
+
+The panel allows one subdomain per server and checks all existing server records before saving. If a hostname is already used, it will reject it as taken.

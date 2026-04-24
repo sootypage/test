@@ -27,6 +27,11 @@ const BRAND_NAME = process.env.BRAND_NAME || 'Custom AMP Panel';
 const AGENT_TOKEN = process.env.PANEL_TO_AGENT_TOKEN || 'change-this-agent-token';
 const TIMEOUT = Number(process.env.NODE_API_TIMEOUT_MS || 10000);
 
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN || '';
+const CLOUDFLARE_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID || '';
+const CLOUDFLARE_ROOT_DOMAIN = String(process.env.CLOUDFLARE_ROOT_DOMAIN || '').toLowerCase().replace(/^\.+|\.+$/g, '');
+const CLOUDFLARE_PROXIED = String(process.env.CLOUDFLARE_PROXIED || 'false').toLowerCase() === 'true';
+
 const API_PERMISSIONS = [
   { key: 'server:start', label: 'Start server' },
   { key: 'server:stop', label: 'Stop server' },
@@ -626,27 +631,119 @@ app.post('/servers/:id/databases/remove', requireLogin, async (req, res) => {
 
 
 
+
+function cloudflareEnabled() {
+  return Boolean(CLOUDFLARE_API_TOKEN && CLOUDFLARE_ZONE_ID && CLOUDFLARE_ROOT_DOMAIN);
+}
+function isIpAddress(value) {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(String(value || '').trim());
+}
+function normalizeSubdomain(hostname) {
+  const clean = String(hostname || '').trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^\.+|\.+$/g, '');
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(clean)) throw new Error('Enter a valid domain or subdomain.');
+  if (CLOUDFLARE_ROOT_DOMAIN && !clean.endsWith(`.${CLOUDFLARE_ROOT_DOMAIN}`) && clean !== CLOUDFLARE_ROOT_DOMAIN) {
+    throw new Error(`Subdomain must be inside ${CLOUDFLARE_ROOT_DOMAIN}.`);
+  }
+  return clean;
+}
+async function cloudflareApi(method, endpoint, body) {
+  const response = await fetch(`https://api.cloudflare.com/client/v4${endpoint}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === false) {
+    const message = data.errors && data.errors[0] ? data.errors[0].message : `Cloudflare HTTP ${response.status}`;
+    throw new Error(message);
+  }
+  return data.result;
+}
+async function createCloudflareRecords({ hostname, target, port }) {
+  if (!cloudflareEnabled()) return { status: 'manual-dns-required', cloudflareEnabled: false };
+  const dnsType = isIpAddress(target) ? 'A' : 'CNAME';
+  const main = await cloudflareApi('POST', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records`, {
+    type: dnsType,
+    name: hostname,
+    content: target,
+    ttl: 1,
+    proxied: CLOUDFLARE_PROXIED
+  });
+  let srv = null;
+  if (Number(port) && Number(port) !== 25565) {
+    srv = await cloudflareApi('POST', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records`, {
+      type: 'SRV',
+      name: `_minecraft._tcp.${hostname}`,
+      data: {
+        service: '_minecraft',
+        proto: '_tcp',
+        name: hostname,
+        priority: 0,
+        weight: 5,
+        port: Number(port),
+        target: hostname
+      },
+      ttl: 1,
+      proxied: false
+    });
+  }
+  return { status: 'cloudflare-created', cloudflareEnabled: true, cloudflareRecordId: main.id, cloudflareSrvRecordId: srv ? srv.id : null, dnsType };
+}
+async function deleteCloudflareRecord(recordId) {
+  if (!cloudflareEnabled() || !recordId) return;
+  await cloudflareApi('DELETE', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records/${recordId}`);
+}
+
 app.post('/servers/:id/subdomains', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  const hostname = String(req.body.hostname || '').trim().toLowerCase();
-  const target = String(req.body.target || '').trim();
-  const recordType = String(req.body.type || 'A').toUpperCase();
-  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(hostname)) { req.flash('error', 'Enter a valid domain or subdomain.'); return res.redirect(`/servers/${ctx.server.id}#subdomains`); }
-  ctx.server.subdomains = ctx.server.subdomains || [];
-  if (!ctx.server.subdomains.some(d => d.hostname === hostname)) {
-    ctx.server.subdomains.push({ id: uuidv4(), hostname, type: recordType, target: target || `${ctx.server.ipAddress || ''}:${ctx.server.port}`, port: req.body.port || ctx.server.port, status: 'manual-dns-required', createdAt: new Date().toISOString() });
+  try {
+    const hostname = normalizeSubdomain(req.body.hostname);
+    const target = String(req.body.target || ctx.server.ipAddress || '').trim();
+    const port = Number(req.body.port || ctx.server.port || 25565);
+    if (!target) throw new Error('Target IP or hostname is required.');
+
+    ctx.server.subdomains = ctx.server.subdomains || [];
+    if (ctx.server.subdomains.length >= 1) throw new Error('This server already has a subdomain. Remove it before adding another one.');
+
+    const takenBy = ctx.db.servers.find(s => (s.subdomains || []).some(d => d.hostname === hostname));
+    if (takenBy) throw new Error('That subdomain is taken by another server.');
+
+    const cloudflare = await createCloudflareRecords({ hostname, target, port });
+    ctx.server.subdomains.push({
+      id: uuidv4(),
+      hostname,
+      target,
+      port,
+      status: cloudflare.status,
+      dnsType: cloudflare.dnsType || (isIpAddress(target) ? 'A' : 'CNAME'),
+      cloudflareRecordId: cloudflare.cloudflareRecordId || null,
+      cloudflareSrvRecordId: cloudflare.cloudflareSrvRecordId || null,
+      createdAt: new Date().toISOString()
+    });
     writeDb(ctx.db);
-    req.flash('success', 'Subdomain saved. Add the DNS record at your DNS provider.');
-  } else {
-    req.flash('error', 'That subdomain is already added.');
+    req.flash('success', cloudflare.cloudflareEnabled ? 'Subdomain created in Cloudflare.' : 'Subdomain saved. Add the DNS record manually or configure Cloudflare in panel/.env.');
+  } catch (e) {
+    req.flash('error', e.message);
   }
   res.redirect(`/servers/${ctx.server.id}#subdomains`);
 });
 app.post('/servers/:id/subdomains/remove', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  ctx.server.subdomains = (ctx.server.subdomains || []).filter(d => d.id !== req.body.subdomainId);
-  writeDb(ctx.db);
-  req.flash('success', 'Subdomain removed from panel. Remove the DNS record at your DNS provider if needed.');
+  const existing = (ctx.server.subdomains || []).find(d => d.id === req.body.subdomainId);
+  try {
+    if (existing) {
+      await deleteCloudflareRecord(existing.cloudflareSrvRecordId);
+      await deleteCloudflareRecord(existing.cloudflareRecordId);
+    }
+    ctx.server.subdomains = (ctx.server.subdomains || []).filter(d => d.id !== req.body.subdomainId);
+    writeDb(ctx.db);
+    req.flash('success', existing && existing.cloudflareRecordId ? 'Subdomain removed and Cloudflare DNS deleted.' : 'Subdomain removed from panel.');
+  } catch (e) {
+    req.flash('error', `Subdomain removed failed: ${e.message}`);
+  }
   res.redirect(`/servers/${ctx.server.id}#subdomains`);
 });
 

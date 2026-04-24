@@ -439,26 +439,29 @@
 
 <section id="tab-subdomains" class="tab-panel">
   <div class="card">
-    <div class="card-title-row"><h2>Subdomains</h2><p class="muted">Save domains for this server and show the DNS values users need.</p></div>
-    <form method="post" action="/servers/<%= server.id %>/subdomains" class="form settings-grid">
-      <label>Domain / subdomain</label><input name="hostname" placeholder="play.example.com" required>
-      <label>Record type</label><select name="type"><option value="A">A record</option><option value="CNAME">CNAME</option><option value="SRV">SRV record note</option></select>
-      <label>Target</label><input name="target" value="<%= server.ipAddress || '' %>" placeholder="Server IP or CNAME target">
-      <label>Port</label><input name="port" type="number" value="<%= server.port %>">
-      <div class="span"><button class="primary">Add subdomain</button></div>
-    </form>
+    <div class="card-title-row"><h2>Subdomains</h2><p class="muted">One subdomain per server. Cloudflare DNS can be created automatically from panel/.env.</p></div>
+    <% if (!(server.subdomains || []).length) { %>
+      <form method="post" action="/servers/<%= server.id %>/subdomains" class="form settings-grid">
+        <label>Domain / subdomain</label><input name="hostname" placeholder="play.example.com" required>
+        <label>Target</label><input name="target" value="<%= server.ipAddress || '' %>" placeholder="Server IP or CNAME target">
+        <label>Port</label><input name="port" type="number" value="<%= server.port %>">
+        <div class="span"><button class="primary">Add subdomain</button></div>
+      </form>
+    <% } else { %>
+      <p class="muted">This server already has a subdomain. Remove it before adding another one.</p>
+    <% } %>
     <table>
-      <thead><tr><th>Hostname</th><th>Type</th><th>Target</th><th>Port</th><th>Status</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Hostname</th><th>Target</th><th>Port</th><th>Status</th><th>Actions</th></tr></thead>
       <tbody>
       <% (server.subdomains || []).forEach(d => { %>
         <tr>
-          <td><%= d.hostname %></td><td><%= d.type %></td><td><%= d.target %></td><td><%= d.port %></td><td><%= d.status %></td>
+          <td><%= d.hostname %></td><td><%= d.target %></td><td><%= d.port %></td><td><%= d.status %></td>
           <td><form method="post" action="/servers/<%= server.id %>/subdomains/remove"><input type="hidden" name="subdomainId" value="<%= d.id %>"><button class="danger small-btn">Remove</button></form></td>
         </tr>
       <% }) %>
       </tbody>
     </table>
-    <p class="muted small">This stores the domain in the panel. Automatic DNS creation can be added next with a Cloudflare API token.</p>
+    <p class="muted small">Cloudflare token, zone ID, and root domain live only in panel/.env. The token is never shown in the UI. For Minecraft, keep Cloudflare proxy off unless you use Spectrum.</p>
   </div>
 </section>
 
