@@ -8,6 +8,7 @@ const morgan = require('morgan');
 const bcrypt = require('bcryptjs');
 const fetch = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
@@ -22,6 +23,124 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 const BRAND_NAME = process.env.BRAND_NAME || 'Custom AMP Panel';
 const AGENT_TOKEN = process.env.PANEL_TO_AGENT_TOKEN || 'change-this-agent-token';
 const TIMEOUT = Number(process.env.NODE_API_TIMEOUT_MS || 10000);
+
+const API_PERMISSIONS = [
+  { key: 'server:start', label: 'Start server' },
+  { key: 'server:stop', label: 'Stop server' },
+  { key: 'server:restart', label: 'Restart server' },
+  { key: 'backup:create', label: 'Make a backup' },
+  { key: 'backup:download', label: 'Download a backup' },
+  { key: 'console:read', label: 'See console logs' },
+  { key: 'console:command', label: 'Send server commands' }
+];
+
+function hashApiKey(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+function makeApiKey() {
+  return `cap_${crypto.randomBytes(32).toString('hex')}`;
+}
+function requireApiPermission(permission) {
+  return (req, res, next) => {
+    const header = req.headers.authorization || '';
+    const raw = header.startsWith('Bearer ') ? header.slice(7) : (req.headers['x-api-key'] || req.query.apiKey || '');
+    if (!raw) return res.status(401).json({ error: 'API key required.' });
+    const db = readDb();
+    const hash = hashApiKey(raw);
+    const key = (db.apiKeys || []).find(k => k.hash === hash && !k.revokedAt);
+    if (!key) return res.status(401).json({ error: 'Invalid API key.' });
+    if (!key.permissions || !key.permissions.includes(permission)) return res.status(403).json({ error: `API key missing permission: ${permission}` });
+    const user = db.users.find(u => u.id === key.userId);
+    if (!user) return res.status(401).json({ error: 'API key user does not exist.' });
+    key.lastUsedAt = new Date().toISOString();
+    writeDb(db);
+    req.apiUser = user;
+    req.apiKey = key;
+    next();
+  };
+}
+function getApiServer(req, res) {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) { res.status(404).json({ error: 'Server not found.' }); return null; }
+  if (req.apiUser.role !== 'admin' && server.ownerId !== req.apiUser.id) { res.status(403).json({ error: 'That server is not yours.' }); return null; }
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  if (!node) { res.status(404).json({ error: 'Node missing.' }); return null; }
+  return { db, server, node };
+}
+async function searchModrinth(query, gameVersion) {
+  const facets = JSON.stringify([["project_type:mod","project_type:plugin"]]);
+  const url = `https://api.modrinth.com/v2/search?limit=8&query=${encodeURIComponent(query)}&facets=${encodeURIComponent(facets)}`;
+  const r = await fetch(url, { headers: { 'User-Agent': `${BRAND_NAME}/1.0` } });
+  if (!r.ok) throw new Error(`Modrinth search failed: HTTP ${r.status}`);
+  const data = await r.json();
+  const results = [];
+  for (const hit of (data.hits || []).slice(0, 8)) {
+    let installUrl = '';
+    try {
+      const loaders = encodeURIComponent(JSON.stringify(['paper','spigot','bukkit','purpur','fabric','forge','neoforge']));
+      const versionsPart = gameVersion ? `&game_versions=${encodeURIComponent(JSON.stringify([gameVersion]))}` : '';
+      const vr = await fetch(`https://api.modrinth.com/v2/project/${encodeURIComponent(hit.project_id)}/version?loaders=${loaders}${versionsPart}`, { headers: { 'User-Agent': `${BRAND_NAME}/1.0` } });
+      if (vr.ok) {
+        const versions = await vr.json();
+        const primary = versions && versions[0] && ((versions[0].files || []).find(f => f.primary) || (versions[0].files || [])[0]);
+        if (primary) installUrl = primary.url;
+      }
+    } catch {}
+    results.push({
+      source: 'Modrinth',
+      type: hit.project_type === 'mod' ? 'mod' : 'plugin',
+      name: hit.title,
+      description: hit.description || '',
+      iconUrl: hit.icon_url || '',
+      projectUrl: `https://modrinth.com/${hit.project_type}/${hit.slug}`,
+      installUrl
+    });
+  }
+  return results;
+}
+async function searchSpiget(query) {
+  const r = await fetch(`https://api.spiget.org/v2/search/resources/${encodeURIComponent(query)}?size=8&sort=-downloads`, { headers: { 'User-Agent': `${BRAND_NAME}/1.0` } });
+  if (!r.ok) throw new Error(`Spiget search failed: HTTP ${r.status}`);
+  const data = await r.json();
+  return (Array.isArray(data) ? data : []).slice(0, 8).map(item => ({
+    source: 'Spigot/Spiget',
+    type: 'plugin',
+    name: item.name,
+    description: String(item.tag || item.description || '').replace(/<[^>]+>/g, '').slice(0, 180),
+    iconUrl: item.icon && item.icon.url ? `https://www.spigotmc.org/${item.icon.url}` : '',
+    projectUrl: `https://www.spigotmc.org/resources/${item.id}/`,
+    installUrl: `https://api.spiget.org/v2/resources/${item.id}/download`
+  }));
+}
+async function searchHangar(query) {
+  const urls = [
+    `https://hangar.papermc.io/api/v1/projects?query=${encodeURIComponent(query)}&limit=8&platform=PAPER`,
+    `https://hangar.papermc.io/api/v1/projects?query=${encodeURIComponent(query)}&limit=8`
+  ];
+  let data = null;
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { headers: { 'User-Agent': `${BRAND_NAME}/1.0` } });
+      if (r.ok) { data = await r.json(); break; }
+    } catch {}
+  }
+  const items = data && (data.result || data.results || data.projects || data.items || []);
+  return (Array.isArray(items) ? items : []).slice(0, 8).map(item => {
+    const owner = item.owner || item.namespace?.owner || item.user || '';
+    const slug = item.slug || item.name || item.namespace?.slug || item.namespace?.project;
+    return {
+      source: 'Hangar',
+      type: 'plugin',
+      name: item.name || slug,
+      description: item.description || item.desc || '',
+      iconUrl: item.avatarUrl || item.avatar || '',
+      projectUrl: owner && slug ? `https://hangar.papermc.io/${owner}/${slug}` : 'https://hangar.papermc.io/',
+      installUrl: ''
+    };
+  });
+}
+
 
 const PLUGIN_CATALOG = [
   { type: 'plugin', name: 'LuckPerms', description: 'Permissions plugin for Minecraft servers.', url: 'https://download.luckperms.net/1565/bukkit/loader/LuckPerms-Bukkit-5.5.10.jar' },
@@ -142,7 +261,7 @@ app.get('/api-keys', requireLogin, (req, res) => {
   const db = readDb();
   const user = currentUser(req);
   const apiKeys = db.apiKeys.filter(k => user.role === 'admin' || k.userId === user.id);
-  res.render('api-keys', { title: 'API Keys', apiKeys });
+  res.render('api-keys', { title: 'API Keys', apiKeys, users: db.users, permissions: API_PERMISSIONS });
 });
 
 app.get('/servers/:id', requireLogin, async (req, res) => {
@@ -284,6 +403,127 @@ app.post('/servers/:id/settings', requireLogin, async (req, res) => {
   } catch (e) { req.flash('error', e.message); }
   res.redirect(`/servers/${ctx.server.id}#settings`);
 });
+
+
+app.get('/servers/:id/addons/search', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  const query = String(req.query.q || '').trim();
+  const source = String(req.query.source || 'all').toLowerCase();
+  if (!query) return res.json({ results: [] });
+  const gameVersion = String(req.query.version || '').trim();
+  const tasks = [];
+  if (source === 'all' || source === 'modrinth') tasks.push(searchModrinth(query, gameVersion).catch(e => [{ source: 'Modrinth', error: e.message }]));
+  if (source === 'all' || source === 'hangar') tasks.push(searchHangar(query).catch(e => [{ source: 'Hangar', error: e.message }]));
+  if (source === 'all' || source === 'spigot' || source === 'spiget') tasks.push(searchSpiget(query).catch(e => [{ source: 'Spigot/Spiget', error: e.message }]));
+  const chunks = await Promise.all(tasks);
+  res.json({ results: chunks.flat().slice(0, 24) });
+});
+
+app.post('/servers/:id/backups/restore', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups/restore`, { method: 'POST', body: { name: req.body.name }, timeout: TIMEOUT * 120 });
+    req.flash('success', 'Backup restored. Server was restarted if it was online.');
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect(`/servers/${ctx.server.id}#backups`);
+});
+
+app.get('/servers/:id/properties', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try {
+    const data = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/properties`);
+    res.render('properties-edit', { title: `Edit server.properties`, server: ctx.server, content: data.content || '' });
+  } catch (e) { req.flash('error', e.message); res.redirect(`/servers/${ctx.server.id}#settings`); }
+});
+
+app.post('/servers/:id/properties', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/properties`, { method: 'POST', body: { content: req.body.content || '' } });
+    req.flash('success', 'server.properties saved. Restart the server if needed.');
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect(`/servers/${ctx.server.id}/properties`);
+});
+
+app.post('/api-keys', requireLogin, (req, res) => {
+  const db = readDb();
+  const user = currentUser(req);
+  const targetUserId = user.role === 'admin' && req.body.userId ? req.body.userId : user.id;
+  const targetUser = db.users.find(u => u.id === targetUserId);
+  if (!targetUser) { req.flash('error', 'User not found.'); return res.redirect('/api-keys'); }
+  const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : (req.body.permissions ? [req.body.permissions] : []);
+  const allowed = API_PERMISSIONS.map(p => p.key);
+  const cleanPermissions = permissions.filter(p => allowed.includes(p));
+  const token = makeApiKey();
+  db.apiKeys = db.apiKeys || [];
+  db.apiKeys.push({
+    id: uuidv4(),
+    userId: targetUser.id,
+    name: req.body.name || 'API Key',
+    prefix: token.slice(0, 12),
+    hash: hashApiKey(token),
+    permissions: cleanPermissions,
+    createdAt: new Date().toISOString(),
+    lastUsedAt: null
+  });
+  writeDb(db);
+  req.flash('success', `API key created. Copy it now: ${token}`);
+  res.redirect('/api-keys');
+});
+
+app.post('/api-keys/:keyId/delete', requireLogin, (req, res) => {
+  const db = readDb();
+  const user = currentUser(req);
+  const key = (db.apiKeys || []).find(k => k.id === req.params.keyId);
+  if (!key) { req.flash('error', 'API key not found.'); return res.redirect('/api-keys'); }
+  if (user.role !== 'admin' && key.userId !== user.id) { req.flash('error', 'You cannot delete that key.'); return res.redirect('/api-keys'); }
+  key.revokedAt = new Date().toISOString();
+  writeDb(db);
+  req.flash('success', 'API key revoked.');
+  res.redirect('/api-keys');
+});
+
+app.get('/api/v1/servers/:id/logs', requireApiPermission('console:read'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/logs?lines=${encodeURIComponent(req.query.lines || '5000')}`)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/v1/servers/:id/command', requireApiPermission('console:command'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/command`, { method: 'POST', body: { command: req.body.command } })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/v1/servers/:id/start', requireApiPermission('server:start'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/start`, { method: 'POST' })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/v1/servers/:id/stop', requireApiPermission('server:stop'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/stop`, { method: 'POST' })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/v1/servers/:id/restart', requireApiPermission('server:restart'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/restart`, { method: 'POST' })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/v1/servers/:id/backups', requireApiPermission('backup:create'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`, { method: 'POST', timeout: TIMEOUT * 60 })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/v1/servers/:id/backups/:name', requireApiPermission('backup:download'), async (req, res) => {
+  const ctx = getApiServer(req, res); if (!ctx) return;
+  try {
+    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups/${encodeURIComponent(req.params.name)}`, { timeout: TIMEOUT * 30 });
+    if (!response.ok) throw new Error((await response.text()) || `Backup download failed: HTTP ${response.status}`);
+    res.setHeader('Content-Disposition', response.headers.get('content-disposition') || `attachment; filename="${req.params.name}"`);
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/gzip');
+    response.body.pipe(res);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {

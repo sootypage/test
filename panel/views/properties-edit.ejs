@@ -1,0 +1,16 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1>server.properties</h1>
+    <p>Editing <%= server.name %>. Restart the server after changing most settings.</p>
+  </div>
+  <a class="button" href="/servers/<%= server.id %>#settings">Back to server</a>
+</section>
+
+<section class="card">
+  <form method="post" action="/servers/<%= server.id %>/properties" class="form">
+    <textarea name="content" class="file-editor"><%= content %></textarea>
+    <button class="primary">Save server.properties</button>
+  </form>
+</section>
+<%- include('layout-bottom') %>

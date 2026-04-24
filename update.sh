@@ -2,13 +2,14 @@
 set -euo pipefail
 
 APP_DIR="/opt/custom-amp/custom-amp-ubuntu-panel"
-REPO_URL="https://github.com/sootypage/test.git"
+REPO_URL=""
 BRANCH="main"
 
 PANEL_SERVICE="custom-amp-panel"
 AGENT_SERVICE="custom-amp-agent"
 
 if [ -f "$APP_DIR/.env.update" ]; then
+  # shellcheck disable=SC1090
   source "$APP_DIR/.env.update"
 fi
 
@@ -19,12 +20,9 @@ if [ -z "${REPO_URL}" ]; then
 fi
 
 if [ -z "${REPO_URL}" ]; then
-  echo "ERROR: REPO_URL is not set."
-  echo "Create this file:"
-  echo "$APP_DIR/.env.update"
-  echo ""
-  echo "Put this inside:"
-  echo "REPO_URL=https://github.com/sootypage/test.git"
+  echo "ERROR: REPO_URL is not set and no git remote was found."
+  echo "Put this in $APP_DIR/.env.update:"
+  echo "REPO_URL=https://github.com/YOUR_USERNAME/YOUR_REPO.git"
   echo "BRANCH=main"
   exit 1
 fi
@@ -34,28 +32,25 @@ echo "[INFO] Branch: $BRANCH"
 
 sudo apt update
 sudo apt install -y git rsync
-
 sudo mkdir -p /opt/custom-amp
 
 if [ ! -d "$APP_DIR/.git" ]; then
-  echo "[INFO] Current install is not a git repo. Updating safely from GitHub..."
-
+  echo "[INFO] App folder is not a git checkout yet. Converting it safely..."
   TMP_CLONE="/tmp/custom-amp-update-$(date +%s)"
   git clone --branch "$BRANCH" "$REPO_URL" "$TMP_CLONE"
 
   echo "[INFO] Preserving configs and data..."
-
   [ -f "$APP_DIR/panel/.env" ] && cp "$APP_DIR/panel/.env" /tmp/custom-amp-panel.env
   [ -f "$APP_DIR/agent/.env" ] && cp "$APP_DIR/agent/.env" /tmp/custom-amp-agent.env
   [ -f "$APP_DIR/.env.update" ] && cp "$APP_DIR/.env.update" /tmp/custom-amp-update.env
 
   sudo rsync -a --delete \
-    --exclude "panel/.env" \
-    --exclude "agent/.env" \
-    --exclude "panel/data/" \
-    --exclude "panel/node_modules/" \
-    --exclude "agent/node_modules/" \
-    --exclude ".env.update" \
+    --exclude 'panel/.env' \
+    --exclude 'agent/.env' \
+    --exclude 'panel/data/' \
+    --exclude 'panel/node_modules/' \
+    --exclude 'agent/node_modules/' \
+    --exclude '.env.update' \
     "$TMP_CLONE/" "$APP_DIR/"
 
   [ -f /tmp/custom-amp-panel.env ] && sudo mv /tmp/custom-amp-panel.env "$APP_DIR/panel/.env"
@@ -64,8 +59,7 @@ if [ ! -d "$APP_DIR/.git" ]; then
 
   rm -rf "$TMP_CLONE"
 else
-  echo "[INFO] Git repo found. Resetting code to match GitHub..."
-
+  echo "[INFO] Resetting code to match GitHub, while preserving configs/data..."
   cd "$APP_DIR"
 
   git remote set-url origin "$REPO_URL"
@@ -97,14 +91,12 @@ if [ -d agent ]; then
   npm install --omit=dev
 fi
 
-echo "[INFO] Restarting services..."
-
+echo "[INFO] Restarting services if they exist..."
 if systemctl list-unit-files | grep -q "^${PANEL_SERVICE}.service"; then
   sudo systemctl restart "$PANEL_SERVICE"
 fi
-
 if systemctl list-unit-files | grep -q "^${AGENT_SERVICE}.service"; then
   sudo systemctl restart "$AGENT_SERVICE"
 fi
 
-echo "[DONE] Updated code from GitHub without deleting servers, backups, configs, nodes, or panel data."
+echo "[DONE] Updated code from GitHub without deleting servers, backups, node config, or panel data."

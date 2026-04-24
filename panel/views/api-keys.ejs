@@ -2,32 +2,77 @@
 <section class="hero">
   <div>
     <h1>API Keys</h1>
-    <p>This tab is ready for your next step. You can wire it into your future API system.</p>
+    <p>Create per-user API keys and choose exactly what each key is allowed to do.</p>
   </div>
 </section>
 
 <section class="grid-2">
   <div class="card">
-    <h2>Coming next</h2>
-    <p class="muted">This page is added to the main navigation so you can build out per-user API keys later.</p>
-    <ul class="installed-list">
-      <li>Per-user key management</li>
-      <li>Create and revoke buttons</li>
-      <li>Scope and permission controls</li>
-      <li>Usage log / last used time</li>
-    </ul>
+    <h2>Create API key</h2>
+    <form method="post" action="/api-keys" class="form">
+      <% if (user && user.role === 'admin') { %>
+        <label>User</label>
+        <select name="userId">
+          <% users.forEach(u => { %>
+            <option value="<%= u.id %>"><%= u.email %> · <%= u.role %></option>
+          <% }) %>
+        </select>
+      <% } %>
+
+      <label>Key name</label>
+      <input name="name" placeholder="Discord bot key" required>
+
+      <label>Permissions</label>
+      <div class="permission-grid">
+        <% permissions.forEach(p => { %>
+          <label class="check-card">
+            <input type="checkbox" name="permissions" value="<%= p.key %>">
+            <span><%= p.label %></span>
+            <small><%= p.key %></small>
+          </label>
+        <% }) %>
+      </div>
+
+      <button class="primary">Create key</button>
+    </form>
+    <p class="muted small">The full key is shown only once after creation. Copy it before leaving the page.</p>
   </div>
+
   <div class="card">
-    <h2>Current placeholder</h2>
-    <% if (apiKeys && apiKeys.length) { %>
-      <ul class="installed-list">
-      <% apiKeys.forEach(key => { %>
-        <li><span><%= key.name || key.id %></span><span class="muted"><%= key.lastUsedAt || 'Never used' %></span></li>
-      <% }) %>
-      </ul>
-    <% } else { %>
-      <p class="muted">No API keys yet.</p>
-    <% } %>
+    <h2>How to use</h2>
+    <p class="muted">Use the key as a bearer token.</p>
+    <pre class="console small-console">curl -H "Authorization: Bearer YOUR_API_KEY" \
+  http://your-panel-url/api/v1/servers/SERVER_ID/logs</pre>
+    <p class="muted small">API routes currently support start, stop, restart, create backup, download backup, read console logs, and send commands.</p>
   </div>
+</section>
+
+<section class="card">
+  <h2>Existing API keys</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>User</th><th>Prefix</th><th>Permissions</th><th>Last used</th><th>Actions</th></tr>
+    </thead>
+    <tbody>
+      <% (apiKeys || []).filter(k => !k.revokedAt).forEach(k => { const owner = users.find(u => u.id === k.userId); %>
+        <tr>
+          <td><%= k.name %></td>
+          <td><%= owner ? owner.email : 'Unknown user' %></td>
+          <td><code><%= k.prefix %>...</code></td>
+          <td>
+            <div class="chips">
+              <% (k.permissions || []).forEach(perm => { %><span><%= perm %></span><% }) %>
+            </div>
+          </td>
+          <td><%= k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : 'Never' %></td>
+          <td>
+            <form method="post" action="/api-keys/<%= k.id %>/delete" onsubmit="return confirm('Revoke this API key?')">
+              <button class="danger small-btn">Revoke</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
 </section>
 <%- include('layout-bottom') %>

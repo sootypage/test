@@ -149,6 +149,10 @@
           <td><%= new Date(b.createdAt).toLocaleString() %></td>
           <td class="actions-cell">
             <a href="/servers/<%= server.id %>/backups/<%= encodeURIComponent(b.name) %>">Download</a>
+            <form method="post" action="/servers/<%= server.id %>/backups/restore" onsubmit="return confirm('Restore this backup? This will replace current server files.')">
+              <input type="hidden" name="name" value="<%= b.name %>">
+              <button class="small-btn">Restore</button>
+            </form>
             <form method="post" action="/servers/<%= server.id %>/backups/delete" onsubmit="return confirm('Delete backup?')">
               <input type="hidden" name="name" value="<%= b.name %>">
               <button class="danger small-btn">Delete</button>
@@ -166,19 +170,32 @@
     <div class="card-title-row addons-header">
       <div>
         <h2>Plugin / Mod installer</h2>
-        <p class="muted">Browse quick installs or paste a direct jar URL.</p>
+        <p class="muted">Search Modrinth, Hangar, and Spigot/Spiget, or paste a direct jar URL.</p>
       </div>
-      <div class="addons-search">
-        <input id="catalogSearch" placeholder="Search addons">
-      </div>
+    </div>
+
+    <div class="plugin-searchbar">
+      <input id="realAddonSearch" placeholder="Search plugins or mods, like LuckPerms, EssentialsX, Geyser">
+      <select id="realAddonSource">
+        <option value="all">All sources</option>
+        <option value="modrinth">Modrinth</option>
+        <option value="hangar">Hangar</option>
+        <option value="spiget">Spigot/Spiget</option>
+      </select>
+      <button type="button" onclick="searchRealAddons()">Search</button>
     </div>
 
     <div class="sub-tabs">
-      <button type="button" class="subtab-btn active" data-subtab="all">All</button>
+      <button type="button" class="subtab-btn active" data-subtab="search">Search</button>
       <button type="button" class="subtab-btn" data-subtab="installed">Installed</button>
+      <button type="button" class="subtab-btn" data-subtab="manual">Manual URL</button>
     </div>
 
-    <div id="catalog-all" class="subtab-panel active">
+    <div id="catalog-search" class="subtab-panel active">
+      <div id="realAddonStatus" class="muted small">Search for plugins or mods above.</div>
+      <div class="addon-grid" id="realAddonGrid"></div>
+
+      <h3>Quick install picks</h3>
       <div class="addon-grid" id="addonGrid">
         <% pluginCatalog.forEach(item => { %>
           <div class="addon-card" data-search="<%= (item.name + ' ' + item.description + ' ' + item.type).toLowerCase() %>">
@@ -197,7 +214,58 @@
           </div>
         <% }) %>
       </div>
+    </div>
 
+    <div id="catalog-installed" class="subtab-panel">
+      <div class="grid-2">
+        <div class="card inner-card">
+          <h3>Installed plugins</h3>
+          <% if (plugins && plugins.error) { %><p class="error"><%= plugins.error %></p><% } %>
+          <ul class="installed-list">
+            <% (plugins && plugins.items ? plugins.items : []).filter(item => item.type === 'file').forEach(item => { %>
+              <li>
+                <span><%= item.name %></span>
+                <span class="actions-cell">
+                  <a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a>
+                  <form method="post" action="/servers/<%= server.id %>/files/delete" onsubmit="return confirm('Uninstall <%= item.name %>? Restart after uninstalling.')">
+                    <input type="hidden" name="path" value="<%= item.path %>">
+                    <input type="hidden" name="currentPath" value="plugins">
+                    <button class="danger small-btn">Uninstall</button>
+                  </form>
+                </span>
+              </li>
+            <% }) %>
+            <% if (!(plugins && plugins.items && plugins.items.filter(item => item.type === 'file').length)) { %>
+              <li class="muted">No plugins found yet.</li>
+            <% } %>
+          </ul>
+        </div>
+        <div class="card inner-card">
+          <h3>Installed mods</h3>
+          <% if (mods && mods.error) { %><p class="error"><%= mods.error %></p><% } %>
+          <ul class="installed-list">
+            <% (mods && mods.items ? mods.items : []).filter(item => item.type === 'file').forEach(item => { %>
+              <li>
+                <span><%= item.name %></span>
+                <span class="actions-cell">
+                  <a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a>
+                  <form method="post" action="/servers/<%= server.id %>/files/delete" onsubmit="return confirm('Uninstall <%= item.name %>? Restart after uninstalling.')">
+                    <input type="hidden" name="path" value="<%= item.path %>">
+                    <input type="hidden" name="currentPath" value="mods">
+                    <button class="danger small-btn">Uninstall</button>
+                  </form>
+                </span>
+              </li>
+            <% }) %>
+            <% if (!(mods && mods.items && mods.items.filter(item => item.type === 'file').length)) { %>
+              <li class="muted">No mods found yet.</li>
+            <% } %>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="catalog-manual" class="subtab-panel">
       <div class="card inner-card">
         <h3>Install from direct URL</h3>
         <form method="post" action="/servers/<%= server.id %>/installer" class="form two-col add-url-form">
@@ -212,41 +280,12 @@
         </form>
       </div>
     </div>
-
-    <div id="catalog-installed" class="subtab-panel">
-      <div class="grid-2">
-        <div class="card inner-card">
-          <h3>Installed plugins</h3>
-          <% if (plugins && plugins.error) { %><p class="error"><%= plugins.error %></p><% } %>
-          <ul class="installed-list">
-            <% (plugins && plugins.items ? plugins.items : []).filter(item => item.type === 'file').forEach(item => { %>
-              <li><span><%= item.name %></span><a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a></li>
-            <% }) %>
-            <% if (!(plugins && plugins.items && plugins.items.filter(item => item.type === 'file').length)) { %>
-              <li class="muted">No plugins found yet.</li>
-            <% } %>
-          </ul>
-        </div>
-        <div class="card inner-card">
-          <h3>Installed mods</h3>
-          <% if (mods && mods.error) { %><p class="error"><%= mods.error %></p><% } %>
-          <ul class="installed-list">
-            <% (mods && mods.items ? mods.items : []).filter(item => item.type === 'file').forEach(item => { %>
-              <li><span><%= item.name %></span><a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a></li>
-            <% }) %>
-            <% if (!(mods && mods.items && mods.items.filter(item => item.type === 'file').length)) { %>
-              <li class="muted">No mods found yet.</li>
-            <% } %>
-          </ul>
-        </div>
-      </div>
-    </div>
   </div>
 </section>
 
 <section id="tab-settings" class="tab-panel">
   <div class="card">
-    <h2>Server settings</h2>
+    <div class="card-title-row"><h2>Server settings</h2><a class="button" href="/servers/<%= server.id %>/properties">Full server.properties editor</a></div>
     <% const s = settings && settings.settings ? settings.settings : {}; %>
     <% if (settings && settings.error) { %><p class="error"><%= settings.error %></p><% } %>
     <form method="post" action="/servers/<%= server.id %>/settings" class="form settings-grid">
@@ -367,6 +406,45 @@ if (searchInput) {
       card.style.display = !term || card.dataset.search.includes(term) ? '' : 'none';
     });
   });
+}
+
+
+async function searchRealAddons() {
+  const q = document.getElementById('realAddonSearch').value.trim();
+  const source = document.getElementById('realAddonSource').value;
+  const grid = document.getElementById('realAddonGrid');
+  const status = document.getElementById('realAddonStatus');
+  if (!q) { status.textContent = 'Type a search first.'; return; }
+  status.textContent = 'Searching...';
+  grid.innerHTML = '';
+  try {
+    const version = encodeURIComponent('<%= (settings && settings.settings && settings.settings.version) || "" %>');
+    const res = await fetch(`/servers/<%= server.id %>/addons/search?q=${encodeURIComponent(q)}&source=${encodeURIComponent(source)}&version=${version}`);
+    const data = await res.json();
+    const results = data.results || [];
+    if (!results.length) { status.textContent = 'No results found.'; return; }
+    status.textContent = `${results.length} result(s) found.`;
+    grid.innerHTML = results.map((item, i) => {
+      if (item.error) return `<div class="addon-card"><div class="addon-top"><div class="addon-icon">!</div><div><h3>${item.source}</h3><p>${item.error}</p></div></div></div>`;
+      const install = item.installUrl ? `
+        <form method="post" action="/servers/<%= server.id %>/installer" class="addon-action">
+          <input type="hidden" name="type" value="${escapeHtml(item.type || 'plugin')}">
+          <input type="hidden" name="url" value="${escapeHtml(item.installUrl)}">
+          <button>Install</button>
+        </form>` : `<div class="addon-action"><a class="button" target="_blank" href="${escapeHtml(item.projectUrl || '#')}">Open page</a></div>`;
+      const icon = item.iconUrl ? `<img src="${escapeHtml(item.iconUrl)}" alt="">` : escapeHtml((item.type || 'P').slice(0,1).toUpperCase());
+      return `<div class="addon-card">
+        <div class="addon-top">
+          <div class="addon-icon">${icon}</div>
+          <div><h3>${escapeHtml(item.name || 'Unknown')}</h3><p>${escapeHtml(item.description || '')}</p><p class="muted small">${escapeHtml(item.source || '')} · ${escapeHtml(item.type || 'plugin')}</p></div>
+        </div>${install}</div>`;
+    }).join('');
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
 setInterval(loadLogs, 5000);

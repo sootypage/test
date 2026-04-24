@@ -471,4 +471,55 @@ app.post('/servers/:id/installer', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+app.get('/servers/:id/properties', auth, (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  try {
+    const file = propertiesPath(server);
+    const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    res.json({ content });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/properties', auth, (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  try {
+    fs.writeFileSync(propertiesPath(server), String(req.body.content || ''));
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/backups/restore', auth, async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  const name = String(req.body.name || '');
+  if (!name.endsWith('.tar.gz')) return res.status(400).json({ error: 'Invalid backup name.' });
+  const backup = safePath(serverBackupDir(server), name);
+  if (!fs.existsSync(backup)) return res.status(404).json({ error: 'Backup not found.' });
+
+  try {
+    const state = await inspectContainer(server.containerName);
+    const wasRunning = !!state.Running;
+    if (wasRunning) {
+      try { await docker(['stop', server.containerName], 120000); } catch {}
+    }
+
+    fs.mkdirSync(server.folder, { recursive: true });
+    for (const item of fs.readdirSync(server.folder)) {
+      fs.rmSync(path.join(server.folder, item), { recursive: true, force: true });
+    }
+
+    await run('tar', ['-xzf', backup, '-C', server.folder], 300000);
+
+    if (wasRunning) {
+      try { await docker(['start', server.containerName], 120000); } catch {}
+    }
+
+    res.json({ ok: true, restored: name, restarted: wasRunning });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.listen(PORT, () => console.log(`${AGENT_NAME} agent running on port ${PORT}`));
