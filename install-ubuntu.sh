@@ -95,10 +95,18 @@ fi
 info "Installing system packages..."
 sudo apt update
 PACKAGES=(curl ca-certificates gnupg build-essential)
-if [[ "$INSTALL_PANEL" == true ]]; then PACKAGES+=(nodejs npm); fi
-if [[ "$INSTALL_AGENT" == true ]]; then PACKAGES+=(nodejs npm docker.io); fi
+if [[ "$INSTALL_PANEL" == true ]]; then PACKAGES+=(nodejs); fi
+if [[ "$INSTALL_AGENT" == true ]]; then PACKAGES+=(nodejs docker.io); fi
 if [[ "$SETUP_NGINX" == true ]]; then PACKAGES+=(nginx certbot python3-certbot-nginx); fi
 sudo apt install -y "${PACKAGES[@]}"
+
+if ! command -v node >/dev/null 2>&1; then
+  fail "Node.js was not installed. Install Node.js 20 first, then run this installer again."
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  fail "npm was not found. NodeSource nodejs should include npm. Try: sudo apt install --reinstall nodejs"
+fi
+info "Using Node $(node -v) and npm $(npm -v)"
 
 if [[ "$INSTALL_AGENT" == true ]]; then
   info "Enabling Docker..."
