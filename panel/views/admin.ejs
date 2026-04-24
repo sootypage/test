@@ -13,6 +13,7 @@
   <button class="tab-btn" data-tab="servers">Create server</button>
   <button class="tab-btn" data-tab="plans">Plans</button>
   <button class="tab-btn" data-tab="api">API / Website</button>
+  <button class="tab-btn" data-tab="security">Security</button>
 </section>
 
 <section id="tab-overview" class="tab-panel active">
@@ -115,6 +116,30 @@
     <table><thead><tr><th>Name</th><th>User</th><th>Permissions</th></tr></thead><tbody>
       <% (db.apiKeys || []).filter(k => !k.revokedAt).forEach(k => { const u = db.users.find(u => u.id === k.userId); %><tr><td><%= k.name %></td><td><%= u ? u.email : k.userId %></td><td><%= (k.permissions || []).join(', ') %></td></tr><% }) %>
     </tbody></table>
+  </div>
+</section>
+
+<section id="tab-security" class="tab-panel">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Panel security</h2>
+      <ul class="installed-list">
+        <li><span>Helmet security headers</span><span>Enabled</span></li>
+        <li><span>Login rate limit</span><span>20 / 15 min</span></li>
+        <li><span>API rate limit</span><span>120 / min</span></li>
+        <li><span>Secure cookies</span><span>Set COOKIE_SECURE=true when using HTTPS</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Node security checklist</h2>
+      <ul class="installed-list">
+        <li><span>Use a long AGENT_TOKEN</span><span>32+ chars</span></li>
+        <li><span>Do not expose port 4100 publicly unless needed</span><span>Use firewall</span></li>
+        <li><span>Allow only panel IP to node port</span><span>Recommended</span></li>
+        <li><span>Use HTTPS/reverse proxy for panel</span><span>Recommended</span></li>
+      </ul>
+      <div class="codebox">sudo ufw allow from PANEL_IP to any port 4100 proto tcp</div>
+    </div>
   </div>
 </section>
 

@@ -4,6 +4,7 @@ const express = require('express');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const multer = require('multer');
+const rateLimit = require('express-rate-limit');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -12,6 +13,8 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT || 4100);
 const AGENT_NAME = process.env.AGENT_NAME || 'Ubuntu Node';
 const AGENT_LOCATION = process.env.AGENT_LOCATION || 'Unknown';
@@ -25,7 +28,8 @@ const MAX_CONSOLE_LINES = Number(process.env.MAX_CONSOLE_LINES || 5000);
 for (const dir of [SERVERS_DIR, BACKUPS_DIR, TMP_DIR]) fs.mkdirSync(dir, { recursive: true });
 if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ servers: [] }, null, 2));
 
-const upload = multer({ dest: TMP_DIR, limits: { fileSize: 1024 * 1024 * 1024 } });
+const upload = multer({ dest: TMP_DIR, limits: { fileSize: 1024 * 1024 * 1024 * 5 } });
+const agentLimiter = rateLimit({ windowMs: 60 * 1000, limit: 240, standardHeaders: true, legacyHeaders: false });
 
 function readDb() { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
 function writeDb(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
@@ -216,7 +220,8 @@ function serverSettings(server) {
   };
 }
 
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false, referrerPolicy: { policy: 'same-origin' } }));
+app.use(agentLimiter);
 app.use(morgan('dev'));
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -451,6 +456,43 @@ app.post('/servers/:id/backups/delete', auth, (req, res) => {
   if (!server) return res.status(404).json({ error: 'Server not found.' });
   try { fs.rmSync(safePath(serverBackupDir(server), req.body.name || ''), { force: true }); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+
+app.post('/servers/:id/saves/upload', auth, upload.single('save'), async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  if (!req.file) return res.status(400).json({ error: 'Save file is required.' });
+  const worldName = safeName(req.body.worldName || 'world') || 'world';
+  const mode = req.body.mode === 'replace' ? 'replace' : 'new';
+  const target = safePath(server.folder, worldName);
+  const work = path.join(TMP_DIR, `save-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`);
+  try {
+    await ensureStorageAvailable(server, req.file.size);
+    fs.mkdirSync(work, { recursive: true });
+    const original = req.file.originalname.toLowerCase();
+    if (original.endsWith('.zip')) {
+      await run('unzip', ['-q', req.file.path, '-d', work], 300000);
+    } else if (original.endsWith('.tar.gz') || original.endsWith('.tgz')) {
+      await run('tar', ['-xzf', req.file.path, '-C', work], 300000);
+    } else {
+      throw new Error('Upload a .zip, .tar.gz, or .tgz world/save archive.');
+    }
+    if (mode === 'replace' && fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(target, { recursive: true });
+    const children = fs.readdirSync(work);
+    let source = work;
+    if (children.length === 1 && fs.statSync(path.join(work, children[0])).isDirectory()) source = path.join(work, children[0]);
+    for (const name of fs.readdirSync(source)) {
+      fs.cpSync(path.join(source, name), path.join(target, name), { recursive: true });
+    }
+    res.json({ ok: true, world: worldName, path: relPath(server.folder, target) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  } finally {
+    fs.rmSync(req.file.path, { force: true });
+    fs.rmSync(work, { recursive: true, force: true });
+  }
 });
 
 app.post('/servers/:id/installer', auth, async (req, res) => {

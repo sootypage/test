@@ -71,7 +71,7 @@ fi
 
 info "Installing system packages..."
 sudo apt update
-PACKAGES=(curl ca-certificates gnupg build-essential rsync)
+PACKAGES=(curl ca-certificates gnupg build-essential rsync unzip tar)
 if [[ "$INSTALL_PANEL" == true ]]; then PACKAGES+=(nodejs); fi
 if [[ "$INSTALL_AGENT" == true ]]; then PACKAGES+=(nodejs docker.io); fi
 if [[ "$SETUP_NGINX" == true ]]; then PACKAGES+=(nginx certbot python3-certbot-nginx); fi
