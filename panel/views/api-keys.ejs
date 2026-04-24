@@ -1,0 +1,33 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1>API Keys</h1>
+    <p>This tab is ready for your next step. You can wire it into your future API system.</p>
+  </div>
+</section>
+
+<section class="grid-2">
+  <div class="card">
+    <h2>Coming next</h2>
+    <p class="muted">This page is added to the main navigation so you can build out per-user API keys later.</p>
+    <ul class="installed-list">
+      <li>Per-user key management</li>
+      <li>Create and revoke buttons</li>
+      <li>Scope and permission controls</li>
+      <li>Usage log / last used time</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2>Current placeholder</h2>
+    <% if (apiKeys && apiKeys.length) { %>
+      <ul class="installed-list">
+      <% apiKeys.forEach(key => { %>
+        <li><span><%= key.name || key.id %></span><span class="muted"><%= key.lastUsedAt || 'Never used' %></span></li>
+      <% }) %>
+      </ul>
+    <% } else { %>
+      <p class="muted">No API keys yet.</p>
+    <% } %>
+  </div>
+</section>
+<%- include('layout-bottom') %>

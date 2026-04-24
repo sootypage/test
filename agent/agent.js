@@ -32,6 +32,7 @@ function writeDb(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 function safeName(name) { return String(name || 'server').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 40); }
 function id() { return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'); }
 function getServer(serverId) { return readDb().servers.find(s => s.id === serverId); }
+function getServerIndex(serverId) { return readDb().servers.findIndex(s => s.id === serverId); }
 function serverBackupDir(server) { const dir = path.join(BACKUPS_DIR, server.id); fs.mkdirSync(dir, { recursive: true }); return dir; }
 function safePath(base, requested = '') {
   const resolved = path.resolve(base, requested || '.');
@@ -143,6 +144,78 @@ function downloadFile(url, dest) {
   });
 }
 
+function defaultEnv(memoryMb, name) {
+  return {
+    EULA: 'TRUE',
+    ENABLE_RCON: 'true',
+    RCON_PASSWORD: 'minecraft',
+    TYPE: 'PAPER',
+    VERSION: 'LATEST',
+    MEMORY: `${Math.floor(memoryMb * 0.85)}M`,
+    MOTD: name || 'Minecraft Server'
+  };
+}
+function buildDockerArgs(server) {
+  const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  env.MEMORY = env.MEMORY || `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
+  const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1), '-p', `${server.port}:25565`, '-v', `${server.folder}:/data`];
+  for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${String(value)}`);
+  args.push(server.image || 'itzg/minecraft-server:java21');
+  return args;
+}
+async function removeContainer(name) {
+  try { await docker(['rm', '-f', name], 60000); } catch (e) {}
+}
+async function recreateContainer(server) {
+  await removeContainer(server.containerName);
+  await docker(buildDockerArgs(server), 180000);
+}
+
+function propertiesPath(server) { return path.join(server.folder, 'server.properties'); }
+function readProperties(server) {
+  const file = propertiesPath(server);
+  const props = {};
+  if (!fs.existsSync(file)) return props;
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  for (const line of lines) {
+    if (!line || line.startsWith('#') || !line.includes('=')) continue;
+    const index = line.indexOf('=');
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1);
+    props[key] = value;
+  }
+  return props;
+}
+function writeProperties(server, changes) {
+  const file = propertiesPath(server);
+  const props = readProperties(server);
+  for (const [k, v] of Object.entries(changes)) {
+    if (v === undefined || v === null || v === '') continue;
+    props[k] = String(v);
+  }
+  const lines = Object.keys(props).sort().map(key => `${key}=${props[key]}`);
+  fs.writeFileSync(file, lines.join('\n') + '\n');
+}
+function serverSettings(server) {
+  const props = readProperties(server);
+  const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  return {
+    version: env.VERSION || 'LATEST',
+    motd: props.motd || env.MOTD || server.name,
+    seed: props['level-seed'] || '',
+    levelType: props['level-type'] || 'minecraft\:normal',
+    difficulty: props.difficulty || 'easy',
+    gameMode: props.gamemode || 'survival',
+    maxPlayers: props['max-players'] || '20',
+    onlineMode: String(props['online-mode'] || 'true'),
+    pvp: String(props.pvp || 'true'),
+    allowFlight: String(props['allow-flight'] || 'false'),
+    spawnProtection: props['spawn-protection'] || '16',
+    viewDistance: props['view-distance'] || '10',
+    simulationDistance: props['simulation-distance'] || '10'
+  };
+}
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(morgan('dev'));
 app.use(express.json({ limit: '20mb' }));
@@ -169,15 +242,12 @@ app.post('/servers', auth, async (req, res) => {
   const storageLimitMb = Number(req.body.storageLimitMb || 10240);
   const ipAddress = req.body.ipAddress || '';
   const containerName = `amp-${safeName(name)}-${serverId.slice(0, 8)}`;
-  const env = Object.assign({ EULA: 'TRUE', ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft' }, req.body.env || {});
+  const env = Object.assign(defaultEnv(memoryMb, name), req.body.env || {});
 
-  const args = ['run', '-d', '--name', containerName, '--restart', 'unless-stopped', '-m', `${memoryMb}m`, '--cpus', String(cpuLimit), '-p', `${port}:25565`, '-v', `${folder}:/data`];
-  for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${value}`);
-  args.push(image);
+  const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, env, game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
 
   try {
-    await docker(args);
-    const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
+    await docker(buildDockerArgs(server));
     db.servers.push(server);
     writeDb(db);
     res.json({ ok: true, server });
@@ -202,7 +272,7 @@ app.get('/servers/:id', auth, async (req, res) => {
     const out = await docker(['logs', '--tail', String(MAX_CONSOLE_LINES), server.containerName]);
     logs = `${out.stdout || ''}${out.stderr || ''}`;
   } catch (e) { logs = e.message; }
-  res.json({ server, state, stats: await serverStats(server), logs });
+  res.json({ server, state, stats: await serverStats(server), settings: serverSettings(server), logs });
 });
 
 app.get('/servers/:id/logs', auth, async (req, res) => {
@@ -246,6 +316,45 @@ app.post('/servers/:id/command', auth, async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message + ' Make sure RCON is enabled.' }); }
 });
 
+app.get('/servers/:id/settings', auth, async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  res.json({ settings: serverSettings(server), server });
+});
+app.post('/servers/:id/settings', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  const currentVersion = (server.env && server.env.VERSION) || 'LATEST';
+  const nextVersion = String(req.body.version || currentVersion).trim() || currentVersion;
+
+  server.env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  server.env.VERSION = nextVersion;
+  if (req.body.motd !== undefined) server.env.MOTD = String(req.body.motd || server.name);
+  writeProperties(server, {
+    motd: req.body.motd,
+    'level-seed': req.body.seed,
+    'level-type': req.body.levelType,
+    difficulty: req.body.difficulty,
+    gamemode: req.body.gameMode,
+    'max-players': req.body.maxPlayers,
+    'online-mode': req.body.onlineMode,
+    pvp: req.body.pvp,
+    'allow-flight': req.body.allowFlight,
+    'spawn-protection': req.body.spawnProtection,
+    'view-distance': req.body.viewDistance,
+    'simulation-distance': req.body.simulationDistance
+  });
+  db.servers[index] = server;
+  writeDb(db);
+
+  try {
+    if (nextVersion !== currentVersion) await recreateContainer(server);
+    res.json({ ok: true, settings: serverSettings(server), recreated: nextVersion !== currentVersion });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/servers/:id/files', auth, (req, res) => {
   const server = getServer(req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found.' });
@@ -256,7 +365,8 @@ app.get('/servers/:id/files', auth, (req, res) => {
       const stat = fs.statSync(full);
       return { name: d.name, path: relPath(server.folder, full), type: d.isDirectory() ? 'dir' : 'file', size: stat.size, modifiedAt: stat.mtime.toISOString() };
     }).sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-    res.json({ path: relPath(server.folder, dir), parent: relPath(server.folder, path.dirname(dir)), items });
+    const rel = relPath(server.folder, dir);
+    res.json({ path: rel === '.' ? '' : rel, parent: relPath(server.folder, path.dirname(dir)) === '.' ? '' : relPath(server.folder, path.dirname(dir)), items });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

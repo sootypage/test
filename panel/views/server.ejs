@@ -2,7 +2,7 @@
 <section class="hero">
   <div>
     <h1><%= server.name %></h1>
-    <p><%= server.game %> on <%= node ? node.name : "Unknown node" %> · <%= server.ipAddress || "IP not set" %>:<%= server.port %></p>
+    <p><%= server.game %> on <%= node ? node.name : 'Unknown node' %> · <%= server.ipAddress || 'IP not set' %>:<%= server.port %></p>
   </div>
   <div class="status <%= live && live.state && live.state.Running ? 'online' : 'offline' %>">
     <%= live && live.state && live.state.Running ? 'Online' : 'Offline' %>
@@ -16,7 +16,7 @@
       <div><strong id="cpuStat"><%= live && live.stats && live.stats.docker ? live.stats.docker.cpuPercent : '0%' %></strong><span>CPU</span></div>
       <div><strong id="ramStat"><%= live && live.stats && live.stats.docker ? live.stats.docker.memoryUsage : '0B / 0B' %></strong><span>RAM</span></div>
       <div><strong id="storageStat"><%= live && live.stats && live.stats.storage ? Math.ceil(live.stats.storage.usedBytes / 1024 / 1024) + ' MB / ' + (live.stats.storage.limitMb || 0) + ' MB' : '0 MB' %></strong><span>Storage</span></div>
-      <div><strong id="diskStat"><%= live && live.stats && live.stats.storage && live.stats.storage.disk ? live.stats.storage.disk.availableBytes ? Math.floor(live.stats.storage.disk.availableBytes / 1024 / 1024 / 1024) + ' GB free' : 'Unknown' : 'Unknown' %></strong><span>Node disk</span></div>
+      <div><strong id="diskStat"><%= live && live.stats && live.stats.storage && live.stats.storage.disk && live.stats.storage.disk.availableBytes ? Math.floor(live.stats.storage.disk.availableBytes / 1024 / 1024 / 1024) + ' GB free' : 'Unknown' %></strong><span>Node disk</span></div>
     </div>
   </div>
   <div class="card">
@@ -27,120 +27,126 @@
       <span>Storage <%= server.storageLimitMb || 0 %> MB</span>
       <span>Join: <%= server.ipAddress || 'IP not set' %>:<%= server.port %></span>
     </div>
-    <p class="muted small">RAM and CPU are Docker limits. Storage is enforced by the panel/agent for uploads and installers.</p>
+    <div class="button-row mt-12">
+      <form method="post" action="/servers/<%= server.id %>/action"><button name="action" value="start" class="primary">Start</button></form>
+      <form method="post" action="/servers/<%= server.id %>/action"><button name="action" value="restart">Restart</button></form>
+      <form method="post" action="/servers/<%= server.id %>/action"><button name="action" value="stop" class="danger">Stop</button></form>
+    </div>
   </div>
 </section>
 
-<section class="grid-2">
+<section class="tab-bar card">
+  <button class="tab-btn active" data-tab="console">Console</button>
+  <button class="tab-btn" data-tab="files">File manager</button>
+  <button class="tab-btn" data-tab="backups">Backups</button>
+  <button class="tab-btn" data-tab="addons">Plugins / Mods</button>
+  <button class="tab-btn" data-tab="settings">Settings</button>
+</section>
+
+<section id="tab-console" class="tab-panel active">
   <div class="card">
-    <h2>Power controls</h2>
-    <form method="post" action="/servers/<%= server.id %>/action" class="button-row">
-      <button name="action" value="start" class="primary">Start</button>
-      <button name="action" value="restart">Restart</button>
-      <button name="action" value="stop" class="danger">Stop</button>
-    </form>
-  </div>
-
-  <div class="card">
-    <h2>Console command</h2>
-    <form method="post" action="/servers/<%= server.id %>/command" class="command-form">
-      <input name="command" placeholder="say hello from the panel" required>
-      <button>Send</button>
-    </form>
-    <p class="muted small">Uses RCON inside the Docker container.</p>
-  </div>
-</section>
-
-<section class="card">
-  <div class="card-title-row">
-    <h2>Live console logs</h2>
-    <button type="button" onclick="loadLogs()">Refresh</button>
-  </div>
-  <% if (live && live.error) { %>
-    <pre id="consoleBox" class="console"><%= live.error %></pre>
-  <% } else { %>
-    <pre id="consoleBox" class="console"><%= live && live.logs ? live.logs : 'No logs yet.' %></pre>
-  <% } %>
-  <p class="muted small">This shows the latest Docker logs, including joins, leaves, chat, warnings, and server startup messages. It auto-refreshes every 5 seconds.</p>
-</section>
-
-<section class="card">
-  <div class="card-title-row">
-    <h2>File manager</h2>
-    <div class="path-pill">/<%= files && files.path ? files.path : '' %></div>
-  </div>
-
-  <% if (files && files.error) { %><p class="error"><%= files.error %></p><% } %>
-
-  <div class="file-actions">
-    <form method="get" action="/servers/<%= server.id %>" class="inline-form-wide">
-      <input name="path" value="<%= files && files.path ? files.path : '' %>" placeholder="folder/path">
-      <button>Open path</button>
-    </form>
-    <% if (files && files.path) { %>
-      <a class="button" href="/servers/<%= server.id %>?path=<%= encodeURIComponent(files.parent || '') %>">Up</a>
+    <div class="card-title-row">
+      <h2>Live console logs</h2>
+      <button type="button" onclick="loadLogs()">Refresh</button>
+    </div>
+    <div class="command-wrap">
+      <form method="post" action="/servers/<%= server.id %>/command" class="command-form">
+        <input name="command" placeholder="say hello from the panel" required>
+        <button>Send</button>
+      </form>
+    </div>
+    <% if (live && live.error) { %>
+      <pre id="consoleBox" class="console"><%= live.error %></pre>
+    <% } else { %>
+      <pre id="consoleBox" class="console"><%= live && live.logs ? live.logs : 'No logs yet.' %></pre>
     <% } %>
+    <p class="muted small">Shows server startup, joins, leaves, chat, warnings, and more. Auto-refreshes every 5 seconds.</p>
   </div>
-
-  <div class="file-actions">
-    <form method="post" action="/servers/<%= server.id %>/files/upload" enctype="multipart/form-data" class="inline-form-wide">
-      <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
-      <input type="file" name="file" required>
-      <button class="primary">Upload</button>
-    </form>
-    <form method="post" action="/servers/<%= server.id %>/files/mkdir" class="inline-form-wide">
-      <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
-      <input name="name" placeholder="new-folder" required>
-      <button>Create folder</button>
-    </form>
-  </div>
-
-  <table>
-    <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
-    <tbody>
-      <% (files && files.items ? files.items : []).forEach(item => { %>
-        <tr>
-          <td>
-            <% if (item.type === 'dir') { %>
-              📁 <a href="/servers/<%= server.id %>?path=<%= encodeURIComponent(item.path) %>"><%= item.name %></a>
-            <% } else { %>
-              📄 <%= item.name %>
-            <% } %>
-          </td>
-          <td><%= item.type %></td>
-          <td><%= item.size %></td>
-          <td><%= new Date(item.modifiedAt).toLocaleString() %></td>
-          <td class="actions-cell">
-            <% if (item.type === 'file') { %>
-              <a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a>
-              <a href="/servers/<%= server.id %>/files/edit?path=<%= encodeURIComponent(item.path) %>">Edit</a>
-            <% } %>
-            <form method="post" action="/servers/<%= server.id %>/files/delete" onsubmit="return confirm('Delete <%= item.name %>?')">
-              <input type="hidden" name="path" value="<%= item.path %>">
-              <input type="hidden" name="currentPath" value="<%= files && files.path ? files.path : '' %>">
-              <button class="danger small-btn">Delete</button>
-            </form>
-          </td>
-        </tr>
-      <% }) %>
-    </tbody>
-  </table>
 </section>
 
-<section class="grid-2">
+<section id="tab-files" class="tab-panel">
   <div class="card">
-    <h2>Backups</h2>
-    <form method="post" action="/servers/<%= server.id %>/backups/create">
-      <button class="primary">Create backup</button>
-    </form>
+    <div class="card-title-row">
+      <h2>File manager</h2>
+      <div class="path-pill">/<%= files && files.path ? files.path : '' %></div>
+    </div>
+
+    <% if (files && files.error) { %><p class="error"><%= files.error %></p><% } %>
+
+    <div class="file-actions">
+      <form method="get" action="/servers/<%= server.id %>" class="inline-form-wide">
+        <input type="hidden" name="tab" value="files">
+        <input name="path" value="<%= files && files.path ? files.path : '' %>" placeholder="folder/path">
+        <button>Open path</button>
+      </form>
+      <% if (files && files.path) { %>
+        <a class="button" href="/servers/<%= server.id %>?path=<%= encodeURIComponent(files.parent || '') %>#files">Up</a>
+      <% } %>
+    </div>
+
+    <div class="file-actions">
+      <form method="post" action="/servers/<%= server.id %>/files/upload" enctype="multipart/form-data" class="inline-form-wide">
+        <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
+        <input type="file" name="file" required>
+        <button class="primary">Upload</button>
+      </form>
+      <form method="post" action="/servers/<%= server.id %>/files/mkdir" class="inline-form-wide">
+        <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
+        <input name="name" placeholder="new-folder" required>
+        <button>Create folder</button>
+      </form>
+    </div>
+
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+      <tbody>
+        <% (files && files.items ? files.items : []).forEach(item => { %>
+          <tr>
+            <td>
+              <% if (item.type === 'dir') { %>
+                📁 <a href="/servers/<%= server.id %>?path=<%= encodeURIComponent(item.path) %>#files"><%= item.name %></a>
+              <% } else { %>
+                📄 <%= item.name %>
+              <% } %>
+            </td>
+            <td><%= item.type %></td>
+            <td><%= item.size %></td>
+            <td><%= new Date(item.modifiedAt).toLocaleString() %></td>
+            <td class="actions-cell">
+              <% if (item.type === 'file') { %>
+                <a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a>
+                <a href="/servers/<%= server.id %>/files/edit?path=<%= encodeURIComponent(item.path) %>">Edit</a>
+              <% } %>
+              <form method="post" action="/servers/<%= server.id %>/files/delete" onsubmit="return confirm('Delete <%= item.name %>?')">
+                <input type="hidden" name="path" value="<%= item.path %>">
+                <input type="hidden" name="currentPath" value="<%= files && files.path ? files.path : '' %>">
+                <button class="danger small-btn">Delete</button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="tab-backups" class="tab-panel">
+  <div class="card">
+    <div class="card-title-row">
+      <h2>Backups</h2>
+      <form method="post" action="/servers/<%= server.id %>/backups/create">
+        <button class="primary">Create backup</button>
+      </form>
+    </div>
     <% if (backups && backups.error) { %><p class="error"><%= backups.error %></p><% } %>
     <table>
-      <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Name</th><th>Size</th><th>Created</th><th>Actions</th></tr></thead>
       <tbody>
       <% (backups && backups.backups ? backups.backups : []).forEach(b => { %>
         <tr>
-          <td><%= b.name %><br><span class="muted small"><%= new Date(b.createdAt).toLocaleString() %></span></td>
+          <td><%= b.name %></td>
           <td><%= b.size %></td>
+          <td><%= new Date(b.createdAt).toLocaleString() %></td>
           <td class="actions-cell">
             <a href="/servers/<%= server.id %>/backups/<%= encodeURIComponent(b.name) %>">Download</a>
             <form method="post" action="/servers/<%= server.id %>/backups/delete" onsubmit="return confirm('Delete backup?')">
@@ -153,20 +159,158 @@
       </tbody>
     </table>
   </div>
+</section>
 
+<section id="tab-addons" class="tab-panel">
   <div class="card">
-    <h2>Plugin / mod installer</h2>
-    <form method="post" action="/servers/<%= server.id %>/installer" class="form">
-      <label>Type</label>
-      <select name="type">
-        <option value="plugin">Plugin: saves to /plugins</option>
-        <option value="mod">Mod: saves to /mods</option>
+    <div class="card-title-row addons-header">
+      <div>
+        <h2>Plugin / Mod installer</h2>
+        <p class="muted">Browse quick installs or paste a direct jar URL.</p>
+      </div>
+      <div class="addons-search">
+        <input id="catalogSearch" placeholder="Search addons">
+      </div>
+    </div>
+
+    <div class="sub-tabs">
+      <button type="button" class="subtab-btn active" data-subtab="all">All</button>
+      <button type="button" class="subtab-btn" data-subtab="installed">Installed</button>
+    </div>
+
+    <div id="catalog-all" class="subtab-panel active">
+      <div class="addon-grid" id="addonGrid">
+        <% pluginCatalog.forEach(item => { %>
+          <div class="addon-card" data-search="<%= (item.name + ' ' + item.description + ' ' + item.type).toLowerCase() %>">
+            <div class="addon-top">
+              <div class="addon-icon"><%= item.type === 'mod' ? 'M' : 'P' %></div>
+              <div>
+                <h3><%= item.name %></h3>
+                <p><%= item.description %></p>
+              </div>
+            </div>
+            <form method="post" action="/servers/<%= server.id %>/installer" class="addon-action">
+              <input type="hidden" name="type" value="<%= item.type %>">
+              <input type="hidden" name="url" value="<%= item.url %>">
+              <button><%= item.type === 'mod' ? 'Install mod' : 'Install plugin' %></button>
+            </form>
+          </div>
+        <% }) %>
+      </div>
+
+      <div class="card inner-card">
+        <h3>Install from direct URL</h3>
+        <form method="post" action="/servers/<%= server.id %>/installer" class="form two-col add-url-form">
+          <label>Type</label>
+          <select name="type">
+            <option value="plugin">Plugin</option>
+            <option value="mod">Mod</option>
+          </select>
+          <label>Download URL</label>
+          <input name="url" placeholder="https://example.com/plugin.jar" required>
+          <button class="primary span">Install from URL</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="catalog-installed" class="subtab-panel">
+      <div class="grid-2">
+        <div class="card inner-card">
+          <h3>Installed plugins</h3>
+          <% if (plugins && plugins.error) { %><p class="error"><%= plugins.error %></p><% } %>
+          <ul class="installed-list">
+            <% (plugins && plugins.items ? plugins.items : []).filter(item => item.type === 'file').forEach(item => { %>
+              <li><span><%= item.name %></span><a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a></li>
+            <% }) %>
+            <% if (!(plugins && plugins.items && plugins.items.filter(item => item.type === 'file').length)) { %>
+              <li class="muted">No plugins found yet.</li>
+            <% } %>
+          </ul>
+        </div>
+        <div class="card inner-card">
+          <h3>Installed mods</h3>
+          <% if (mods && mods.error) { %><p class="error"><%= mods.error %></p><% } %>
+          <ul class="installed-list">
+            <% (mods && mods.items ? mods.items : []).filter(item => item.type === 'file').forEach(item => { %>
+              <li><span><%= item.name %></span><a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a></li>
+            <% }) %>
+            <% if (!(mods && mods.items && mods.items.filter(item => item.type === 'file').length)) { %>
+              <li class="muted">No mods found yet.</li>
+            <% } %>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="tab-settings" class="tab-panel">
+  <div class="card">
+    <h2>Server settings</h2>
+    <% const s = settings && settings.settings ? settings.settings : {}; %>
+    <% if (settings && settings.error) { %><p class="error"><%= settings.error %></p><% } %>
+    <form method="post" action="/servers/<%= server.id %>/settings" class="form settings-grid">
+      <label>Minecraft version</label>
+      <input name="version" value="<%= s.version || 'LATEST' %>" placeholder="1.21.11 or LATEST">
+
+      <label>MOTD</label>
+      <input name="motd" value="<%= s.motd || server.name %>" placeholder="A Minecraft Server">
+
+      <label>World seed</label>
+      <input name="seed" value="<%= s.seed || '' %>" placeholder="Leave blank for random">
+
+      <label>Level type</label>
+      <input name="levelType" value="<%= s.levelType || 'minecraft:normal' %>">
+
+      <label>Difficulty</label>
+      <select name="difficulty">
+        <% ['peaceful','easy','normal','hard'].forEach(v => { %>
+          <option value="<%= v %>" <%= (s.difficulty || 'easy') === v ? 'selected' : '' %>><%= v %></option>
+        <% }) %>
       </select>
-      <label>Download URL</label>
-      <input name="url" placeholder="https://example.com/plugin.jar" required>
-      <button class="primary">Install</button>
+
+      <label>Game mode</label>
+      <select name="gameMode">
+        <% ['survival','creative','adventure','spectator'].forEach(v => { %>
+          <option value="<%= v %>" <%= (s.gameMode || 'survival') === v ? 'selected' : '' %>><%= v %></option>
+        <% }) %>
+      </select>
+
+      <label>Max players</label>
+      <input name="maxPlayers" type="number" value="<%= s.maxPlayers || 20 %>">
+
+      <label>Spawn protection</label>
+      <input name="spawnProtection" type="number" value="<%= s.spawnProtection || 16 %>">
+
+      <label>View distance</label>
+      <input name="viewDistance" type="number" value="<%= s.viewDistance || 10 %>">
+
+      <label>Simulation distance</label>
+      <input name="simulationDistance" type="number" value="<%= s.simulationDistance || 10 %>">
+
+      <label>Online mode</label>
+      <select name="onlineMode">
+        <option value="true" <%= String(s.onlineMode || 'true') === 'true' ? 'selected' : '' %>>true</option>
+        <option value="false" <%= String(s.onlineMode || 'true') === 'false' ? 'selected' : '' %>>false</option>
+      </select>
+
+      <label>PvP</label>
+      <select name="pvp">
+        <option value="true" <%= String(s.pvp || 'true') === 'true' ? 'selected' : '' %>>true</option>
+        <option value="false" <%= String(s.pvp || 'true') === 'false' ? 'selected' : '' %>>false</option>
+      </select>
+
+      <label>Allow flight</label>
+      <select name="allowFlight">
+        <option value="true" <%= String(s.allowFlight || 'false') === 'true' ? 'selected' : '' %>>true</option>
+        <option value="false" <%= String(s.allowFlight || 'false') === 'false' ? 'selected' : '' %>>false</option>
+      </select>
+
+      <div class="span">
+        <button class="primary">Save settings</button>
+      </div>
     </form>
-    <p class="muted small">Paste a direct .jar download URL. Restart the server after installing plugins or mods.</p>
+    <p class="muted small">Changing the version recreates the Docker container. Changing the world seed only affects a new world or a reset world.</p>
   </div>
 </section>
 
@@ -197,6 +341,34 @@ async function loadLogs() {
     box.textContent = e.message;
   }
 }
+
+function activateTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'tab-' + name));
+  if (history.replaceState) history.replaceState(null, '', '#'+name);
+}
+function activateSubtab(name) {
+  document.querySelectorAll('.subtab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.subtab === name));
+  document.querySelectorAll('.subtab-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'catalog-' + name));
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+document.querySelectorAll('.subtab-btn').forEach(btn => btn.addEventListener('click', () => activateSubtab(btn.dataset.subtab)));
+
+const hash = (location.hash || '#console').replace('#', '');
+activateTab(hash || 'console');
+activateSubtab('all');
+
+const searchInput = document.getElementById('catalogSearch');
+if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    const term = searchInput.value.trim().toLowerCase();
+    document.querySelectorAll('#addonGrid .addon-card').forEach(card => {
+      card.style.display = !term || card.dataset.search.includes(term) ? '' : 'none';
+    });
+  });
+}
+
 setInterval(loadLogs, 5000);
 setInterval(loadStats, 5000);
 loadStats();
