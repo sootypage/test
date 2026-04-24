@@ -1,0 +1,17 @@
+<%- include('layout-top', { title }) %>
+<section class="hero">
+  <div>
+    <h1>Edit file</h1>
+    <p><%= server.name %> · /<%= file.path %></p>
+  </div>
+  <a class="button" href="/servers/<%= server.id %>">Back to server</a>
+</section>
+
+<section class="card">
+  <form method="post" action="/servers/<%= server.id %>/files/edit" class="form">
+    <input type="hidden" name="path" value="<%= file.path %>">
+    <textarea name="content" class="file-editor"><%= file.content %></textarea>
+    <button class="primary">Save file</button>
+  </form>
+</section>
+<%- include('layout-bottom') %>

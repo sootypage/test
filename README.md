@@ -202,3 +202,36 @@ sudo ufw allow 25565/tcp
 ## Important notes
 
 This is a starter project. Before using it with real customers, add stronger security, PostgreSQL, backups, per-server file permissions, billing, and production hardening.
+
+## New server management features
+
+This version includes extra AMP-style tools:
+
+- File manager for each server
+- Upload files through the browser
+- Download server files through the browser
+- Edit small text files in the browser
+- Delete files/folders
+- Create folders
+- Create and download `.tar.gz` backups
+- Delete backups
+- Plugin installer: downloads direct `.jar` URLs into `/plugins`
+- Mod installer: downloads direct `.jar` URLs into `/mods`
+- Better live console logs with auto-refresh every 5 seconds
+
+### After updating from an older ZIP
+
+If you already installed the old version, copy the new files over your old project folder, then run:
+
+```bash
+cd /opt/custom-amp/panel
+npm install
+cd /opt/custom-amp/agent
+npm install
+sudo systemctl restart custom-amp-panel
+sudo systemctl restart custom-amp-agent
+```
+
+### Plugin/mod installer note
+
+Use direct download links to `.jar` files. Some sites use buttons that do not directly point to the file, so the download may fail. Modrinth/GitHub release direct asset links usually work well.

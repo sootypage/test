@@ -2,37 +2,165 @@
 <section class="hero">
   <div>
     <h1><%= server.name %></h1>
-    <p><%= server.game %> on <%= node ? node.name : 'Unknown node' %></p>
+    <p><%= server.game %> on <%= node ? node.name : 'Unknown node' %> · Port <%= server.port %></p>
   </div>
   <div class="status <%= live && live.state && live.state.Running ? 'online' : 'offline' %>">
     <%= live && live.state && live.state.Running ? 'Online' : 'Offline' %>
   </div>
 </section>
 
-<section class="card">
-  <h2>Power controls</h2>
-  <form method="post" action="/servers/<%= server.id %>/action" class="button-row">
-    <button name="action" value="start" class="primary">Start</button>
-    <button name="action" value="restart">Restart</button>
-    <button name="action" value="stop" class="danger">Stop</button>
-  </form>
+<section class="grid-2">
+  <div class="card">
+    <h2>Power controls</h2>
+    <form method="post" action="/servers/<%= server.id %>/action" class="button-row">
+      <button name="action" value="start" class="primary">Start</button>
+      <button name="action" value="restart">Restart</button>
+      <button name="action" value="stop" class="danger">Stop</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Console command</h2>
+    <form method="post" action="/servers/<%= server.id %>/command" class="command-form">
+      <input name="command" placeholder="say hello from the panel" required>
+      <button>Send</button>
+    </form>
+    <p class="muted small">Uses RCON inside the Docker container.</p>
+  </div>
 </section>
 
 <section class="card">
-  <h2>Console command</h2>
-  <form method="post" action="/servers/<%= server.id %>/command" class="command-form">
-    <input name="command" placeholder="say hello from the panel" required>
-    <button>Send</button>
-  </form>
-  <p class="muted small">Minecraft commands use Docker <code>rcon-cli</code>. Enable RCON in the container env for best results.</p>
-</section>
-
-<section class="card">
-  <h2>Console logs</h2>
+  <div class="card-title-row">
+    <h2>Live console logs</h2>
+    <button type="button" onclick="loadLogs()">Refresh</button>
+  </div>
   <% if (live && live.error) { %>
-    <pre class="console"><%= live.error %></pre>
+    <pre id="consoleBox" class="console"><%= live.error %></pre>
   <% } else { %>
-    <pre class="console"><%= live && live.logs ? live.logs : 'No logs yet.' %></pre>
+    <pre id="consoleBox" class="console"><%= live && live.logs ? live.logs : 'No logs yet.' %></pre>
   <% } %>
+  <p class="muted small">This shows the latest Docker logs, including joins, leaves, chat, warnings, and server startup messages. It auto-refreshes every 5 seconds.</p>
 </section>
+
+<section class="card">
+  <div class="card-title-row">
+    <h2>File manager</h2>
+    <div class="path-pill">/<%= files && files.path ? files.path : '' %></div>
+  </div>
+
+  <% if (files && files.error) { %><p class="error"><%= files.error %></p><% } %>
+
+  <div class="file-actions">
+    <form method="get" action="/servers/<%= server.id %>" class="inline-form-wide">
+      <input name="path" value="<%= files && files.path ? files.path : '' %>" placeholder="folder/path">
+      <button>Open path</button>
+    </form>
+    <% if (files && files.path) { %>
+      <a class="button" href="/servers/<%= server.id %>?path=<%= encodeURIComponent(files.parent || '') %>">Up</a>
+    <% } %>
+  </div>
+
+  <div class="file-actions">
+    <form method="post" action="/servers/<%= server.id %>/files/upload" enctype="multipart/form-data" class="inline-form-wide">
+      <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
+      <input type="file" name="file" required>
+      <button class="primary">Upload</button>
+    </form>
+    <form method="post" action="/servers/<%= server.id %>/files/mkdir" class="inline-form-wide">
+      <input type="hidden" name="path" value="<%= files && files.path ? files.path : '' %>">
+      <input name="name" placeholder="new-folder" required>
+      <button>Create folder</button>
+    </form>
+  </div>
+
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+    <tbody>
+      <% (files && files.items ? files.items : []).forEach(item => { %>
+        <tr>
+          <td>
+            <% if (item.type === 'dir') { %>
+              📁 <a href="/servers/<%= server.id %>?path=<%= encodeURIComponent(item.path) %>"><%= item.name %></a>
+            <% } else { %>
+              📄 <%= item.name %>
+            <% } %>
+          </td>
+          <td><%= item.type %></td>
+          <td><%= item.size %></td>
+          <td><%= new Date(item.modifiedAt).toLocaleString() %></td>
+          <td class="actions-cell">
+            <% if (item.type === 'file') { %>
+              <a href="/servers/<%= server.id %>/files/download?path=<%= encodeURIComponent(item.path) %>">Download</a>
+              <a href="/servers/<%= server.id %>/files/edit?path=<%= encodeURIComponent(item.path) %>">Edit</a>
+            <% } %>
+            <form method="post" action="/servers/<%= server.id %>/files/delete" onsubmit="return confirm('Delete <%= item.name %>?')">
+              <input type="hidden" name="path" value="<%= item.path %>">
+              <input type="hidden" name="currentPath" value="<%= files && files.path ? files.path : '' %>">
+              <button class="danger small-btn">Delete</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<section class="grid-2">
+  <div class="card">
+    <h2>Backups</h2>
+    <form method="post" action="/servers/<%= server.id %>/backups/create">
+      <button class="primary">Create backup</button>
+    </form>
+    <% if (backups && backups.error) { %><p class="error"><%= backups.error %></p><% } %>
+    <table>
+      <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
+      <tbody>
+      <% (backups && backups.backups ? backups.backups : []).forEach(b => { %>
+        <tr>
+          <td><%= b.name %><br><span class="muted small"><%= new Date(b.createdAt).toLocaleString() %></span></td>
+          <td><%= b.size %></td>
+          <td class="actions-cell">
+            <a href="/servers/<%= server.id %>/backups/<%= encodeURIComponent(b.name) %>">Download</a>
+            <form method="post" action="/servers/<%= server.id %>/backups/delete" onsubmit="return confirm('Delete backup?')">
+              <input type="hidden" name="name" value="<%= b.name %>">
+              <button class="danger small-btn">Delete</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Plugin / mod installer</h2>
+    <form method="post" action="/servers/<%= server.id %>/installer" class="form">
+      <label>Type</label>
+      <select name="type">
+        <option value="plugin">Plugin: saves to /plugins</option>
+        <option value="mod">Mod: saves to /mods</option>
+      </select>
+      <label>Download URL</label>
+      <input name="url" placeholder="https://example.com/plugin.jar" required>
+      <button class="primary">Install</button>
+    </form>
+    <p class="muted small">Paste a direct .jar download URL. Restart the server after installing plugins or mods.</p>
+  </div>
+</section>
+
+<script>
+async function loadLogs() {
+  const box = document.getElementById('consoleBox');
+  try {
+    const res = await fetch('/servers/<%= server.id %>/logs.json?lines=5000');
+    const data = await res.json();
+    box.textContent = data.logs || data.error || 'No logs yet.';
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    box.textContent = e.message;
+  }
+}
+setInterval(loadLogs, 5000);
+setTimeout(() => { const box = document.getElementById('consoleBox'); if (box) box.scrollTop = box.scrollHeight; }, 100);
+</script>
 <%- include('layout-bottom') %>
