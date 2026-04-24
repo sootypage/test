@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_DIR="/opt/custom-amp/custom-amp-ubuntu-panel"
-REPO_URL="https://github.com/sootypage/test.git"
+REPO_URL=""
 BRANCH="main"
 
 PANEL_SERVICE="custom-amp-panel"

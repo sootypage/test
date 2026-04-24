@@ -31,7 +31,10 @@ const API_PERMISSIONS = [
   { key: 'backup:create', label: 'Make a backup' },
   { key: 'backup:download', label: 'Download a backup' },
   { key: 'console:read', label: 'See console logs' },
-  { key: 'console:command', label: 'Send server commands' }
+  { key: 'console:command', label: 'Send server commands' },
+  { key: 'servers:list', label: 'List servers for bots' },
+  { key: 'provision:user', label: 'Website: create users' },
+  { key: 'provision:server', label: 'Website: create servers' }
 ];
 
 function hashApiKey(token) {
@@ -61,7 +64,7 @@ function requireApiPermission(permission) {
 }
 function getApiServer(req, res) {
   const db = readDb();
-  const server = db.servers.find(s => s.id === req.params.id);
+  const server = db.servers.find(s => s.id === req.params.id || s.agentServerId === req.params.id);
   if (!server) { res.status(404).json({ error: 'Server not found.' }); return null; }
   if (req.apiUser.role !== 'admin' && server.ownerId !== req.apiUser.id) { res.status(403).json({ error: 'That server is not yours.' }); return null; }
   const node = db.nodes.find(n => n.id === server.nodeId);
@@ -157,17 +160,23 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TMP_DIR, { recursive: true });
 const upload = multer({ dest: TMP_DIR, limits: { fileSize: 1024 * 1024 * 1024 } });
 
-function defaultDb() { return { users: [], nodes: [], servers: [], audit: [], apiKeys: [] }; }
+function defaultDb() { return { users: [], nodes: [], servers: [], audit: [], apiKeys: [], plans: [] }; }
 function readDb() {
   if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify(defaultDb(), null, 2));
   const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
   data.apiKeys = data.apiKeys || [];
+  data.plans = data.plans || [];
+  for (const srv of (data.servers || [])) {
+    srv.subusers = srv.subusers || [];
+    srv.networkPorts = srv.networkPorts || [];
+    srv.databases = srv.databases || [];
+  }
   return data;
 }
 function writeDb(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 function addAudit(action, details = {}) {
   const db = readDb();
-  db.audit.unshift({ id: uuidv4(), action, details, createdAt: new Date().toISOString() });
+  db.audit.unshift({ id: uuidv4(), action, details, subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
   db.audit = db.audit.slice(0, 200);
   writeDb(db);
 }
@@ -176,7 +185,7 @@ async function bootstrapAdmin() {
   const email = process.env.ADMIN_EMAIL || 'admin@example.com';
   const password = process.env.ADMIN_PASSWORD || 'ChangeMe123!';
   if (!db.users.some(u => u.email === email)) {
-    db.users.push({ id: uuidv4(), email, name: 'Admin', role: 'admin', passwordHash: await bcrypt.hash(password, 10), createdAt: new Date().toISOString() });
+    db.users.push({ id: uuidv4(), email, name: 'Admin', role: 'admin', passwordHash: await bcrypt.hash(password, 10), subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
     writeDb(db);
     console.log(`Created admin user: ${email}`);
   }
@@ -274,7 +283,7 @@ app.get('/servers/:id', requireLogin, async (req, res) => {
   try { plugins = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files?path=plugins`); } catch (e) { plugins = { error: e.message, items: [] }; }
   try { mods = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files?path=mods`); } catch (e) { mods = { error: e.message, items: [] }; }
   try { settings = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`); } catch (e) { settings = { error: e.message, settings: {} }; }
-  res.render('server', { title: ctx.server.name, server: ctx.server, node: ctx.node, live, files, backups, plugins, mods, settings, filePath, pluginCatalog: PLUGIN_CATALOG });
+  res.render('server', { title: ctx.server.name, server: ctx.server, node: ctx.node, live, files, backups, plugins, mods, settings, filePath, pluginCatalog: PLUGIN_CATALOG, allUsers: ctx.db.users });
 });
 
 app.post('/servers/:id/action', requireLogin, async (req, res) => {
@@ -525,6 +534,110 @@ app.get('/api/v1/servers/:id/backups/:name', requireApiPermission('backup:downlo
 });
 
 
+
+app.post('/servers/:id/subusers', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  if (ctx.user.role !== 'admin' && ctx.server.ownerId !== ctx.user.id) { req.flash('error', 'Only the owner or admin can manage subusers.'); return res.redirect(`/servers/${ctx.server.id}#subusers`); }
+  const target = ctx.db.users.find(u => u.id === req.body.userId || u.email === req.body.email);
+  if (!target) { req.flash('error', 'User not found. Create the user first.'); return res.redirect(`/servers/${ctx.server.id}#subusers`); }
+  ctx.server.subusers = ctx.server.subusers || [];
+  if (!ctx.server.subusers.some(su => su.userId === target.id)) {
+    ctx.server.subusers.push({ userId: target.id, permissions: Array.isArray(req.body.permissions) ? req.body.permissions : (req.body.permissions ? [req.body.permissions] : []), subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
+    writeDb(ctx.db);
+  }
+  req.flash('success', 'Subuser added.');
+  res.redirect(`/servers/${ctx.server.id}#subusers`);
+});
+app.post('/servers/:id/subusers/remove', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  ctx.server.subusers = (ctx.server.subusers || []).filter(su => su.userId !== req.body.userId);
+  writeDb(ctx.db);
+  req.flash('success', 'Subuser removed.');
+  res.redirect(`/servers/${ctx.server.id}#subusers`);
+});
+app.post('/servers/:id/network/ports', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  ctx.server.networkPorts = ctx.server.networkPorts || [];
+  const port = Number(req.body.port);
+  if (!port || port < 1 || port > 65535) { req.flash('error', 'Invalid port.'); return res.redirect(`/servers/${ctx.server.id}#network`); }
+  if (!ctx.server.networkPorts.some(p => Number(p.port) === port)) ctx.server.networkPorts.push({ port, type: req.body.type || 'tcp', notes: req.body.notes || '', subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
+  writeDb(ctx.db);
+  req.flash('success', 'Network port added to the server record. Add Docker port binding support before using it live.');
+  res.redirect(`/servers/${ctx.server.id}#network`);
+});
+app.post('/servers/:id/network/ports/remove', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  ctx.server.networkPorts = (ctx.server.networkPorts || []).filter(p => String(p.port) !== String(req.body.port));
+  writeDb(ctx.db);
+  req.flash('success', 'Network port removed.');
+  res.redirect(`/servers/${ctx.server.id}#network`);
+});
+app.post('/servers/:id/databases', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  ctx.server.databases = ctx.server.databases || [];
+  const name = String(req.body.name || `${ctx.server.name}_db`).replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 48);
+  ctx.server.databases.push({ id: uuidv4(), name, engine: req.body.engine || 'mysql', username: req.body.username || name, host: req.body.host || 'localhost', port: req.body.port || '3306', subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
+  writeDb(ctx.db);
+  req.flash('success', 'Database record added. This stores DB details now; automatic DB server creation can be wired next.');
+  res.redirect(`/servers/${ctx.server.id}#database`);
+});
+app.post('/servers/:id/databases/remove', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  ctx.server.databases = (ctx.server.databases || []).filter(d => d.id !== req.body.databaseId);
+  writeDb(ctx.db);
+  req.flash('success', 'Database removed.');
+  res.redirect(`/servers/${ctx.server.id}#database`);
+});
+
+
+
+app.get('/api/servers', requireApiPermission('servers:list'), (req, res) => {
+  const db = readDb();
+  const servers = req.apiUser.role === 'admin' ? db.servers : db.servers.filter(s => s.ownerId === req.apiUser.id);
+  res.json({ ok: true, servers: servers.map(s => ({ id: s.id, agentServerId: s.agentServerId, name: s.name, game: s.game, ipAddress: s.ipAddress, port: s.port, memoryMb: s.memoryMb, cpuLimit: s.cpuLimit, storageLimitMb: s.storageLimitMb })) });
+});
+app.get('/api/v1/servers', requireApiPermission('servers:list'), (req, res) => {
+  const db = readDb();
+  const servers = req.apiUser.role === 'admin' ? db.servers : db.servers.filter(s => s.ownerId === req.apiUser.id);
+  res.json({ ok: true, servers: servers.map(s => ({ id: s.id, agentServerId: s.agentServerId, name: s.name, game: s.game, ipAddress: s.ipAddress, port: s.port, memoryMb: s.memoryMb, cpuLimit: s.cpuLimit, storageLimitMb: s.storageLimitMb })) });
+});
+app.post('/api/servers/:id/start', requireApiPermission('server:start'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/start`, { method: 'POST' })); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/servers/:id/stop', requireApiPermission('server:stop'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/stop`, { method: 'POST' })); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/servers/:id/restart', requireApiPermission('server:restart'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/restart`, { method: 'POST' })); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/servers/:id/logs', requireApiPermission('console:read'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/logs?lines=${encodeURIComponent(req.query.lines || '5000')}`)); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/servers/:id/command', requireApiPermission('console:command'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/command`, { method: 'POST', body: { command: req.body.command } })); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/servers/:id/backups', requireApiPermission('backup:create'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`, { method: 'POST', timeout: TIMEOUT * 60 })); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/servers/:id/backups', requireApiPermission('backup:download'), async (req, res) => { const ctx = getApiServer(req, res); if (!ctx) return; try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`)); } catch (e) { res.status(500).json({ error: e.message }); } });
+
+app.post('/api/v1/provision/order', requireApiPermission('provision:server'), async (req, res) => {
+  const db = readDb();
+  try {
+    let user = db.users.find(u => u.email.toLowerCase() === String(req.body.email || '').toLowerCase());
+    let plainPassword = null;
+    if (!user) {
+      if (!req.apiKey.permissions.includes('provision:user')) return res.status(403).json({ error: 'API key missing permission: provision:user' });
+      plainPassword = req.body.password || crypto.randomBytes(8).toString('hex');
+      user = { id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: 'user', passwordHash: await bcrypt.hash(plainPassword, 10), createdAt: new Date().toISOString() };
+      db.users.push(user);
+      writeDb(db);
+    }
+    const node = db.nodes.find(n => n.id === (req.body.nodeId || '')) || db.nodes[0];
+    if (!node) return res.status(400).json({ error: 'No node exists. Add a node first.' });
+    const memoryMb = Number(req.body.memoryMb || 2048);
+    const cpuLimit = Number(req.body.cpuLimit || 1);
+    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+    const port = Number(req.body.port || 25565);
+    const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
+    const name = req.body.serverName || `${user.name || 'server'}-${Date.now()}`;
+    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: req.body.game || 'minecraft-paper', image: req.body.image || 'itzg/minecraft-server:java21', memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: req.body.type || 'PAPER', VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
+    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || 'minecraft-paper', ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
+    db.servers.push(panelServer);
+    writeDb(db);
+    res.json({ ok: true, user: { id: user.id, email: user.email, created: !!plainPassword, password: plainPassword }, server: panelServer });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
 app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
   const db = readDb();
@@ -544,7 +657,7 @@ app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
 app.post('/admin/users', requireLogin, requireAdmin, async (req, res) => {
   const db = readDb();
   if (db.users.some(u => u.email.toLowerCase() === String(req.body.email).toLowerCase())) { req.flash('error', 'User already exists.'); return res.redirect('/admin'); }
-  db.users.push({ id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: req.body.role || 'user', passwordHash: await bcrypt.hash(req.body.password || 'ChangeMe123!', 10), createdAt: new Date().toISOString() });
+  db.users.push({ id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: req.body.role || 'user', passwordHash: await bcrypt.hash(req.body.password || 'ChangeMe123!', 10), subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
   writeDb(db); req.flash('success', 'User created.'); res.redirect('/admin');
 });
 app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
@@ -578,10 +691,29 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
         MOTD: req.body.name || 'Minecraft Server'
       }
     }});
-    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || 'minecraft-paper', ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, createdAt: new Date().toISOString() });
+    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || 'minecraft-paper', ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], createdAt: new Date().toISOString() });
     writeDb(db); req.flash('success', 'Server created on node.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect('/admin');
+});
+
+
+app.post('/admin/plans', requireLogin, requireAdmin, (req, res) => {
+  const db = readDb();
+  db.plans = db.plans || [];
+  db.plans.push({
+    id: uuidv4(),
+    name: req.body.name || 'New Plan',
+    memoryMb: Number(req.body.memoryMb || 2048),
+    cpuLimit: Number(req.body.cpuLimit || 1),
+    storageLimitMb: Number(req.body.storageLimitMb || 10240),
+    extraPorts: Number(req.body.extraPorts || 0),
+    databases: Number(req.body.databases || 0),
+    createdAt: new Date().toISOString()
+  });
+  writeDb(db);
+  req.flash('success', 'Plan saved.');
+  res.redirect('/admin#plans');
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, brand: BRAND_NAME, time: new Date().toISOString() }));

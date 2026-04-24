@@ -2,47 +2,74 @@
 <section class="hero">
   <div>
     <h1>Admin</h1>
-    <p>Add Ubuntu nodes, users, and servers.</p>
+    <p>Manage nodes, users, servers, plans, API keys, and website provisioning.</p>
   </div>
 </section>
 
-<section class="admin-grid">
+<section class="tab-bar card">
+  <button class="tab-btn active" data-tab="overview">Overview</button>
+  <button class="tab-btn" data-tab="nodes">Nodes</button>
+  <button class="tab-btn" data-tab="users">Users</button>
+  <button class="tab-btn" data-tab="servers">Create server</button>
+  <button class="tab-btn" data-tab="plans">Plans</button>
+  <button class="tab-btn" data-tab="api">API / Website</button>
+</section>
+
+<section id="tab-overview" class="tab-panel active">
+  <div class="grid">
+    <div class="card"><h2>Users</h2><div class="stat"><strong><%= db.users.length %></strong><span>Total</span></div></div>
+    <div class="card"><h2>Nodes</h2><div class="stat"><strong><%= db.nodes.length %></strong><span>Total</span></div></div>
+    <div class="card"><h2>Servers</h2><div class="stat"><strong><%= db.servers.length %></strong><span>Total</span></div></div>
+    <div class="card"><h2>API keys</h2><div class="stat"><strong><%= (db.apiKeys || []).filter(k => !k.revokedAt).length %></strong><span>Active</span></div></div>
+  </div>
+</section>
+
+<section id="tab-nodes" class="tab-panel">
   <div class="card">
     <h2>Add Ubuntu node</h2>
-    <form method="post" action="/admin/nodes" class="form">
+    <form method="post" action="/admin/nodes" class="form two-col">
       <label>Name</label><input name="name" required placeholder="Sydney Node 1">
       <label>Agent URL</label><input name="url" required placeholder="http://1.2.3.4:4100">
       <label>Public IP</label><input name="publicIp" placeholder="38.87.117.169">
       <label>Agent token</label><input name="token" placeholder="Paste agent token if different from panel token">
       <label>Location</label><input name="location" placeholder="Australia">
-      <button class="primary">Add node</button>
+      <button class="primary span">Add node</button>
     </form>
   </div>
+  <div class="card">
+    <h2>Nodes</h2>
+    <table><thead><tr><th>Name</th><th>URL</th><th>Public IP</th><th>Location</th></tr></thead><tbody>
+      <% db.nodes.forEach(n => { %><tr><td><%= n.name %></td><td><%= n.url %></td><td><%= n.publicIp || '' %></td><td><%= n.location %></td></tr><% }) %>
+    </tbody></table>
+  </div>
+</section>
 
+<section id="tab-users" class="tab-panel">
   <div class="card">
     <h2>Create user</h2>
-    <form method="post" action="/admin/users" class="form">
+    <form method="post" action="/admin/users" class="form two-col">
       <label>Name</label><input name="name" placeholder="User name">
       <label>Email</label><input name="email" type="email" required>
       <label>Password</label><input name="password" type="text" required>
-      <label>Role</label>
-      <select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
-      <button class="primary">Create user</button>
+      <label>Role</label><select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+      <button class="primary span">Create user</button>
     </form>
   </div>
+  <div class="card">
+    <h2>Users</h2>
+    <table><thead><tr><th>Email</th><th>Name</th><th>Role</th></tr></thead><tbody>
+      <% db.users.forEach(u => { %><tr><td><%= u.email %></td><td><%= u.name %></td><td><%= u.role %></td></tr><% }) %>
+    </tbody></table>
+  </div>
+</section>
 
-  <div class="card wide">
+<section id="tab-servers" class="tab-panel">
+  <div class="card">
     <h2>Create Minecraft Paper server</h2>
     <form method="post" action="/admin/servers" class="form two-col">
       <label>Server name</label><input name="name" required placeholder="survival-1">
-      <label>Owner</label>
-      <select name="ownerId" required>
-        <% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %>
-      </select>
-      <label>Node</label>
-      <select name="nodeId" required>
-        <% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %>
-      </select>
+      <label>Owner</label><select name="ownerId" required><% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %></select>
+      <label>Node</label><select name="nodeId" required><% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %></select>
       <label>Game</label><input name="game" value="minecraft-paper">
       <label>Docker image</label><input name="image" value="itzg/minecraft-server:java21">
       <label>Minecraft version</label><input name="version" value="LATEST">
@@ -56,17 +83,48 @@
   </div>
 </section>
 
-<section class="card">
-  <h2>Nodes</h2>
-  <table><thead><tr><th>Name</th><th>URL</th><th>Public IP</th><th>Location</th></tr></thead><tbody>
-    <% db.nodes.forEach(n => { %><tr><td><%= n.name %></td><td><%= n.url %></td><td><%= n.publicIp || "" %></td><td><%= n.location %></td></tr><% }) %>
-  </tbody></table>
+<section id="tab-plans" class="tab-panel">
+  <div class="card">
+    <h2>Plans</h2>
+    <p class="muted">Use these values for your website checkout when calling the provision API.</p>
+    <form method="post" action="/admin/plans" class="form two-col">
+      <label>Plan name</label><input name="name" placeholder="Minecraft 4GB">
+      <label>RAM MB</label><input name="memoryMb" type="number" value="4096">
+      <label>CPU</label><input name="cpuLimit" type="number" step="0.25" value="2">
+      <label>Storage MB</label><input name="storageLimitMb" type="number" value="20480">
+      <label>Included extra ports</label><input name="extraPorts" type="number" value="0">
+      <label>Included databases</label><input name="databases" type="number" value="0">
+      <button class="primary span">Save plan</button>
+    </form>
+    <table><thead><tr><th>Name</th><th>RAM</th><th>CPU</th><th>Storage</th><th>Ports</th><th>Databases</th></tr></thead><tbody>
+      <% (db.plans || []).forEach(p => { %><tr><td><%= p.name %></td><td><%= p.memoryMb %> MB</td><td><%= p.cpuLimit %></td><td><%= p.storageLimitMb %> MB</td><td><%= p.extraPorts %></td><td><%= p.databases %></td></tr><% }) %>
+    </tbody></table>
+  </div>
 </section>
 
-<section class="card">
-  <h2>Users</h2>
-  <table><thead><tr><th>Email</th><th>Name</th><th>Role</th></tr></thead><tbody>
-    <% db.users.forEach(u => { %><tr><td><%= u.email %></td><td><%= u.name %></td><td><%= u.role %></td></tr><% }) %>
-  </tbody></table>
+<section id="tab-api" class="tab-panel">
+  <div class="card">
+    <h2>API / Website linking</h2>
+    <p class="muted">Create an admin API key with <strong>Website: create users</strong> and <strong>Website: create servers</strong> permissions, then your website can call the provision endpoint after checkout.</p>
+    <div class="codebox">POST /api/v1/provision/order<br>Authorization: Bearer YOUR_API_KEY</div>
+    <p class="muted small">Example JSON: email, name, serverName, planId, memoryMb, cpuLimit, storageLimitMb, port, version, orderId.</p>
+    <a class="button primary" href="/api-keys">Manage API Keys</a>
+  </div>
+  <div class="card">
+    <h2>Active API keys</h2>
+    <table><thead><tr><th>Name</th><th>User</th><th>Permissions</th></tr></thead><tbody>
+      <% (db.apiKeys || []).filter(k => !k.revokedAt).forEach(k => { const u = db.users.find(u => u.id === k.userId); %><tr><td><%= k.name %></td><td><%= u ? u.email : k.userId %></td><td><%= (k.permissions || []).join(', ') %></td></tr><% }) %>
+    </tbody></table>
+  </div>
 </section>
+
+<script>
+function activateTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'tab-' + name));
+  if (history.replaceState) history.replaceState(null, '', '#'+name);
+}
+document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+activateTab((location.hash || '#overview').replace('#',''));
+</script>
 <%- include('layout-bottom') %>
