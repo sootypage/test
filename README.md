@@ -235,3 +235,57 @@ sudo systemctl restart custom-amp-agent
 ### Plugin/mod installer note
 
 Use direct download links to `.jar` files. Some sites use buttons that do not directly point to the file, so the download may fail. Modrinth/GitHub release direct asset links usually work well.
+
+## v4 additions
+
+This version adds:
+
+- RAM, CPU, and storage usage on each server page
+- RAM limit per server using Docker memory limits
+- CPU limit per server using Docker `--cpus`
+- Storage limit per server for panel/agent managed uploads and plugin/mod installs
+- Server IP + public port fields
+- Agent token field on each node, so different nodes can use different tokens
+- Installer asks for the panel name
+- `update.sh` updates code while preserving `.env`, panel data, users, nodes, and servers
+
+### Fixing `Unauthorized agent token`
+
+The panel and agent must use the same token.
+
+Check panel token:
+
+```bash
+cat /opt/custom-amp/custom-amp-ubuntu-panel/panel/.env | grep PANEL_TO_AGENT_TOKEN
+```
+
+Check agent token:
+
+```bash
+cat /opt/custom-amp/custom-amp-ubuntu-panel/agent/.env | grep AGENT_TOKEN
+```
+
+They must match. Restart both services after changing either file:
+
+```bash
+sudo systemctl restart custom-amp-panel
+sudo systemctl restart custom-amp-agent
+```
+
+When adding a node in the admin page, paste the agent token into the **Agent token** field if it is different from the panel default token.
+
+### Updating later
+
+From a newly downloaded/cloned version:
+
+```bash
+chmod +x update.sh
+./update.sh
+```
+
+The updater does not replace:
+
+- `panel/.env`
+- `agent/.env`
+- `panel/data`
+

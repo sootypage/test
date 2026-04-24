@@ -2,10 +2,32 @@
 <section class="hero">
   <div>
     <h1><%= server.name %></h1>
-    <p><%= server.game %> on <%= node ? node.name : 'Unknown node' %> · Port <%= server.port %></p>
+    <p><%= server.game %> on <%= node ? node.name : "Unknown node" %> · <%= server.ipAddress || "IP not set" %>:<%= server.port %></p>
   </div>
   <div class="status <%= live && live.state && live.state.Running ? 'online' : 'offline' %>">
     <%= live && live.state && live.state.Running ? 'Online' : 'Offline' %>
+  </div>
+</section>
+
+<section class="grid-2">
+  <div class="card">
+    <h2>Resource usage</h2>
+    <div class="resource-grid">
+      <div><strong id="cpuStat"><%= live && live.stats && live.stats.docker ? live.stats.docker.cpuPercent : '0%' %></strong><span>CPU</span></div>
+      <div><strong id="ramStat"><%= live && live.stats && live.stats.docker ? live.stats.docker.memoryUsage : '0B / 0B' %></strong><span>RAM</span></div>
+      <div><strong id="storageStat"><%= live && live.stats && live.stats.storage ? Math.ceil(live.stats.storage.usedBytes / 1024 / 1024) + ' MB / ' + (live.stats.storage.limitMb || 0) + ' MB' : '0 MB' %></strong><span>Storage</span></div>
+      <div><strong id="diskStat"><%= live && live.stats && live.stats.storage && live.stats.storage.disk ? live.stats.storage.disk.availableBytes ? Math.floor(live.stats.storage.disk.availableBytes / 1024 / 1024 / 1024) + ' GB free' : 'Unknown' : 'Unknown' %></strong><span>Node disk</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Server limits</h2>
+    <div class="chips">
+      <span>RAM <%= server.memoryMb %> MB</span>
+      <span>CPU <%= server.cpuLimit || 1 %></span>
+      <span>Storage <%= server.storageLimitMb || 0 %> MB</span>
+      <span>Join: <%= server.ipAddress || 'IP not set' %>:<%= server.port %></span>
+    </div>
+    <p class="muted small">RAM and CPU are Docker limits. Storage is enforced by the panel/agent for uploads and installers.</p>
   </div>
 </section>
 
@@ -149,6 +171,21 @@
 </section>
 
 <script>
+async function loadStats() {
+  try {
+    const res = await fetch('/servers/<%= server.id %>/stats.json');
+    const data = await res.json();
+    if (!data.stats) return;
+    document.getElementById('cpuStat').textContent = data.stats.docker.cpuPercent || '0%';
+    document.getElementById('ramStat').textContent = data.stats.docker.memoryUsage || '0B / 0B';
+    const usedMb = Math.ceil((data.stats.storage.usedBytes || 0) / 1024 / 1024);
+    const limitMb = data.stats.storage.limitMb || 0;
+    document.getElementById('storageStat').textContent = usedMb + ' MB / ' + limitMb + ' MB';
+    if (data.stats.storage.disk && data.stats.storage.disk.availableBytes) {
+      document.getElementById('diskStat').textContent = Math.floor(data.stats.storage.disk.availableBytes / 1024 / 1024 / 1024) + ' GB free';
+    }
+  } catch (e) {}
+}
 async function loadLogs() {
   const box = document.getElementById('consoleBox');
   try {
@@ -161,6 +198,8 @@ async function loadLogs() {
   }
 }
 setInterval(loadLogs, 5000);
+setInterval(loadStats, 5000);
+loadStats();
 setTimeout(() => { const box = document.getElementById('consoleBox'); if (box) box.scrollTop = box.scrollHeight; }, 100);
 </script>
 <%- include('layout-bottom') %>

@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const FormData = require('form-data');
+const { URL } = require('url');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -56,13 +57,15 @@ function requireAdmin(req, res, next) {
 }
 function currentUser(req) { if (!req.session.userId) return null; return readDb().users.find(u => u.id === req.session.userId) || null; }
 function agentUrl(node, route) { return `${node.url.replace(/\/$/, '')}${route}`; }
+function agentToken(node) { return node.token || AGENT_TOKEN; }
+function nodeHostFromUrl(url) { try { return new URL(url).hostname; } catch { return ''; } }
 async function callAgent(node, route, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeout || TIMEOUT);
   try {
     const response = await fetch(agentUrl(node, route), {
       method: options.method || 'GET',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${AGENT_TOKEN}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentToken(node)}` },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal
     });
@@ -75,7 +78,7 @@ async function fetchAgent(node, route, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeout || TIMEOUT * 10);
   try {
-    const headers = Object.assign({ Authorization: `Bearer ${AGENT_TOKEN}` }, options.headers || {});
+    const headers = Object.assign({ Authorization: `Bearer ${agentToken(node)}` }, options.headers || {});
     return await fetch(agentUrl(node, route), Object.assign({}, options, { headers, signal: controller.signal }));
   } finally { clearTimeout(timeout); }
 }
@@ -146,6 +149,12 @@ app.post('/servers/:id/command', requireLogin, async (req, res) => {
 app.get('/servers/:id/logs.json', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/logs?lines=${encodeURIComponent(req.query.lines || '5000')}`)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/servers/:id/stats.json', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try { res.json(await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/stats`)); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -228,7 +237,19 @@ app.post('/servers/:id/installer', requireLogin, async (req, res) => {
 
 app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
-  const db = readDb(); db.nodes.push({ id: uuidv4(), name: req.body.name, url: req.body.url, location: req.body.location || 'Unknown', createdAt: new Date().toISOString() }); writeDb(db); req.flash('success', 'Node added.'); res.redirect('/admin');
+  const db = readDb();
+  db.nodes.push({
+    id: uuidv4(),
+    name: req.body.name,
+    url: req.body.url,
+    publicIp: req.body.publicIp || nodeHostFromUrl(req.body.url || ''),
+    token: req.body.token || '',
+    location: req.body.location || 'Unknown',
+    createdAt: new Date().toISOString()
+  });
+  writeDb(db);
+  req.flash('success', 'Node added.');
+  res.redirect('/admin');
 });
 app.post('/admin/users', requireLogin, requireAdmin, async (req, res) => {
   const db = readDb();
@@ -242,15 +263,23 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
   const owner = db.users.find(u => u.id === req.body.ownerId);
   if (!node || !owner) { req.flash('error', 'Pick a valid node and owner.'); return res.redirect('/admin'); }
   try {
+    const memoryMb = Number(req.body.memoryMb || 2048);
+    const cpuLimit = Number(req.body.cpuLimit || 1);
+    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+    const port = Number(req.body.port || 25565);
+    const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const created = await callAgent(node, '/servers', { method: 'POST', body: {
       name: req.body.name,
       game: req.body.game || 'minecraft-paper',
       image: req.body.image || 'itzg/minecraft-server:java21',
-      memoryMb: Number(req.body.memoryMb || 2048),
-      port: Number(req.body.port || 25565),
-      env: { EULA: 'TRUE', TYPE: 'PAPER', VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(Number(req.body.memoryMb || 2048) * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft' }
+      memoryMb,
+      cpuLimit,
+      storageLimitMb,
+      ipAddress,
+      port,
+      env: { EULA: 'TRUE', TYPE: 'PAPER', VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft' }
     }});
-    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || 'minecraft-paper', ownerId: owner.id, nodeId: node.id, memoryMb: Number(req.body.memoryMb || 2048), port: Number(req.body.port || 25565), createdAt: new Date().toISOString() });
+    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || 'minecraft-paper', ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, createdAt: new Date().toISOString() });
     writeDb(db); req.flash('success', 'Server created on node.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect('/admin');

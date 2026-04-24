@@ -14,3 +14,4 @@
 .error{color:#ffb4b4}
 .console{max-height:520px;overflow:auto;white-space:pre-wrap}
 @media (max-width: 900px){.grid-2{grid-template-columns:1fr}.path-pill{max-width:100%}.card-title-row{align-items:flex-start;flex-direction:column}.inline-form-wide{min-width:100%;}}
+.resource-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-top:10px}.resource-grid div{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:14px}.resource-grid strong{display:block;font-size:1.1rem}.resource-grid span{color:#9fb3d1;font-size:.85rem}

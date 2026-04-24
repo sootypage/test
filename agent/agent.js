@@ -71,6 +71,61 @@ async function inspectContainer(containerName) {
     return { Status: 'missing', Running: false, error: e.message };
   }
 }
+
+async function containerStats(containerName) {
+  try {
+    const out = await docker(['stats', '--no-stream', '--format', '{{json .}}', containerName], 30000);
+    const raw = JSON.parse(out.stdout.trim());
+    return {
+      cpuPercent: raw.CPUPerc || '0%',
+      memoryUsage: raw.MemUsage || '0B / 0B',
+      memoryPercent: raw.MemPerc || '0%',
+      netIO: raw.NetIO || '0B / 0B',
+      blockIO: raw.BlockIO || '0B / 0B',
+      pids: raw.PIDs || '0'
+    };
+  } catch (e) {
+    return { error: e.message, cpuPercent: '0%', memoryUsage: '0B / 0B', memoryPercent: '0%' };
+  }
+}
+async function folderUsageBytes(folder) {
+  try {
+    const out = await run('du', ['-sb', folder], 60000);
+    return Number((out.stdout || '0').split(/\s+/)[0]) || 0;
+  } catch {
+    return 0;
+  }
+}
+async function diskInfo(folder) {
+  try {
+    const out = await run('df', ['-PB1', folder], 60000);
+    const lines = out.stdout.trim().split('\n');
+    const parts = lines[1].split(/\s+/);
+    return { filesystem: parts[0], sizeBytes: Number(parts[1]), usedBytes: Number(parts[2]), availableBytes: Number(parts[3]), usedPercent: parts[4] };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+async function serverStats(server) {
+  const usageBytes = await folderUsageBytes(server.folder);
+  return {
+    docker: await containerStats(server.containerName),
+    storage: {
+      usedBytes: usageBytes,
+      limitMb: Number(server.storageLimitMb || 0),
+      limitBytes: Number(server.storageLimitMb || 0) * 1024 * 1024,
+      disk: await diskInfo(server.folder)
+    }
+  };
+}
+async function ensureStorageAvailable(server, extraBytes = 0) {
+  const limitMb = Number(server.storageLimitMb || 0);
+  if (!limitMb) return;
+  const used = await folderUsageBytes(server.folder);
+  const limit = limitMb * 1024 * 1024;
+  if (used + extraBytes > limit) throw new Error(`Storage limit exceeded. Used ${Math.ceil(used / 1024 / 1024)}MB of ${limitMb}MB.`);
+}
+
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https:') ? https : http;
@@ -110,16 +165,19 @@ app.post('/servers', auth, async (req, res) => {
   const image = req.body.image || 'itzg/minecraft-server:java21';
   const port = Number(req.body.port || 25565);
   const memoryMb = Number(req.body.memoryMb || 2048);
+  const cpuLimit = Number(req.body.cpuLimit || 1);
+  const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+  const ipAddress = req.body.ipAddress || '';
   const containerName = `amp-${safeName(name)}-${serverId.slice(0, 8)}`;
   const env = Object.assign({ EULA: 'TRUE', ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft' }, req.body.env || {});
 
-  const args = ['run', '-d', '--name', containerName, '--restart', 'unless-stopped', '-m', `${memoryMb}m`, '-p', `${port}:25565`, '-v', `${folder}:/data`];
+  const args = ['run', '-d', '--name', containerName, '--restart', 'unless-stopped', '-m', `${memoryMb}m`, '--cpus', String(cpuLimit), '-p', `${port}:25565`, '-v', `${folder}:/data`];
   for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${value}`);
   args.push(image);
 
   try {
     await docker(args);
-    const server = { id: serverId, name, image, port, memoryMb, containerName, folder, game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
+    const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
     db.servers.push(server);
     writeDb(db);
     res.json({ ok: true, server });
@@ -131,7 +189,7 @@ app.post('/servers', auth, async (req, res) => {
 app.get('/servers', auth, async (req, res) => {
   const db = readDb();
   const servers = [];
-  for (const server of db.servers) servers.push(Object.assign({}, server, { state: await inspectContainer(server.containerName) }));
+  for (const server of db.servers) servers.push(Object.assign({}, server, { state: await inspectContainer(server.containerName), stats: await serverStats(server) }));
   res.json({ servers });
 });
 
@@ -144,7 +202,7 @@ app.get('/servers/:id', auth, async (req, res) => {
     const out = await docker(['logs', '--tail', String(MAX_CONSOLE_LINES), server.containerName]);
     logs = `${out.stdout || ''}${out.stderr || ''}`;
   } catch (e) { logs = e.message; }
-  res.json({ server, state, logs });
+  res.json({ server, state, stats: await serverStats(server), logs });
 });
 
 app.get('/servers/:id/logs', auth, async (req, res) => {
@@ -155,6 +213,13 @@ app.get('/servers/:id/logs', auth, async (req, res) => {
     const out = await docker(['logs', '--tail', String(lines), server.containerName]);
     res.json({ logs: `${out.stdout || ''}${out.stderr || ''}` });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/servers/:id/stats', auth, async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  try { res.json({ stats: await serverStats(server), state: await inspectContainer(server.containerName), server }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/servers/:id/start', auth, async (req, res) => {
@@ -205,10 +270,11 @@ app.get('/servers/:id/files/download', auth, (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.post('/servers/:id/files/upload', auth, upload.single('file'), (req, res) => {
+app.post('/servers/:id/files/upload', auth, upload.single('file'), async (req, res) => {
   const server = getServer(req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found.' });
   try {
+    await ensureStorageAvailable(server, req.file ? req.file.size : 0);
     const dir = safePath(server.folder, req.body.path || '');
     fs.mkdirSync(dir, { recursive: true });
     const dest = safePath(dir, req.file.originalname);
@@ -286,6 +352,7 @@ app.post('/servers/:id/installer', auth, async (req, res) => {
   try {
     const parsed = new URL(url);
     const filename = path.basename(parsed.pathname) || `download-${Date.now()}.jar`;
+    await ensureStorageAvailable(server, 1024 * 1024 * 200);
     const dir = safePath(server.folder, type);
     fs.mkdirSync(dir, { recursive: true });
     const dest = safePath(dir, filename);

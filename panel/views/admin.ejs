@@ -12,6 +12,8 @@
     <form method="post" action="/admin/nodes" class="form">
       <label>Name</label><input name="name" required placeholder="Sydney Node 1">
       <label>Agent URL</label><input name="url" required placeholder="http://1.2.3.4:4100">
+      <label>Public IP</label><input name="publicIp" placeholder="38.87.117.169">
+      <label>Agent token</label><input name="token" placeholder="Paste agent token if different from panel token">
       <label>Location</label><input name="location" placeholder="Australia">
       <button class="primary">Add node</button>
     </form>
@@ -44,7 +46,10 @@
       <label>Game</label><input name="game" value="minecraft-paper">
       <label>Docker image</label><input name="image" value="itzg/minecraft-server:java21">
       <label>Minecraft version</label><input name="version" value="LATEST">
-      <label>Memory MB</label><input name="memoryMb" type="number" value="2048">
+      <label>Memory limit MB</label><input name="memoryMb" type="number" value="2048">
+      <label>CPU limit</label><input name="cpuLimit" type="number" step="0.25" value="1">
+      <label>Storage limit MB</label><input name="storageLimitMb" type="number" value="10240">
+      <label>Server IP</label><input name="ipAddress" placeholder="Leave blank to use node public IP">
       <label>Public port</label><input name="port" type="number" value="25565">
       <button class="primary span">Create server</button>
     </form>
@@ -53,8 +58,8 @@
 
 <section class="card">
   <h2>Nodes</h2>
-  <table><thead><tr><th>Name</th><th>URL</th><th>Location</th></tr></thead><tbody>
-    <% db.nodes.forEach(n => { %><tr><td><%= n.name %></td><td><%= n.url %></td><td><%= n.location %></td></tr><% }) %>
+  <table><thead><tr><th>Name</th><th>URL</th><th>Public IP</th><th>Location</th></tr></thead><tbody>
+    <% db.nodes.forEach(n => { %><tr><td><%= n.name %></td><td><%= n.url %></td><td><%= n.publicIp || "" %></td><td><%= n.location %></td></tr><% }) %>
   </tbody></table>
 </section>
 

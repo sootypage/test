@@ -16,8 +16,10 @@
       <h2><%= server.name %></h2>
       <p><%= server.game %></p>
       <div class="chips">
-        <span><%= server.memoryMb %> MB</span>
-        <span>Port <%= server.port %></span>
+        <span>RAM <%= server.memoryMb %> MB</span>
+        <span>CPU <%= server.cpuLimit || 1 %></span>
+        <span>Storage <%= server.storageLimitMb || 0 %> MB</span>
+        <span><%= server.ipAddress || "IP not set" %>:<%= server.port %></span>
         <span><%= node ? node.name : 'Unknown node' %></span>
       </div>
     </a>
