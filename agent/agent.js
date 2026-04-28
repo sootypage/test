@@ -46,6 +46,18 @@ function safePath(base, requested = '') {
 }
 function relPath(base, target) { return path.relative(base, target).replace(/\\/g, '/'); }
 
+function filterConsoleLogs(logs) {
+  return String(logs || '')
+    .split(/\r?\n/)
+    .filter(line => {
+      if (!line.trim()) return true;
+      if (line.includes('ServerMain WARN Advanced terminal features are not available in this environment')) return false;
+      if (line.includes('Stopping with rcon-cli')) return false;
+      return true;
+    })
+    .join('\n');
+}
+
 function docker(args, timeout = 120000) {
   return new Promise((resolve, reject) => {
     execFile('docker', args, { timeout, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
@@ -413,7 +425,7 @@ app.get('/servers/:id', auth, async (req, res) => {
   let logs = '';
   try {
     const out = await docker(['logs', '--tail', String(MAX_CONSOLE_LINES), server.containerName]);
-    logs = `${out.stdout || ''}${out.stderr || ''}`;
+    logs = filterConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`);
   } catch (e) { logs = e.message; }
   res.json({ server, state, stats: await serverStats(server), settings: serverSettings(server), logs });
 });
@@ -424,7 +436,7 @@ app.get('/servers/:id/logs', auth, async (req, res) => {
   const lines = Math.min(Number(req.query.lines || MAX_CONSOLE_LINES), 50000);
   try {
     const out = await docker(['logs', '--tail', String(lines), server.containerName]);
-    res.json({ logs: `${out.stdout || ''}${out.stderr || ''}` });
+    res.json({ logs: filterConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -688,6 +700,25 @@ app.post('/servers/:id/saves/upload', auth, upload.single('save'), async (req, r
     fs.rmSync(req.file.path, { force: true });
     fs.rmSync(work, { recursive: true, force: true });
   }
+});
+
+
+app.get('/servers/:id/saves/download', auth, async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  const worldName = safeName(req.query.worldName || 'world') || 'world';
+  try {
+    const worldDir = safePath(server.folder, worldName);
+    if (!fs.existsSync(worldDir) || !fs.statSync(worldDir).isDirectory()) {
+      return res.status(404).json({ error: `World folder '${worldName}' was not found.` });
+    }
+    const outFile = path.join(TMP_DIR, `${safeName(server.name)}-${worldName}-${Date.now()}.tar.gz`);
+    await run('tar', ['-czf', outFile, '-C', server.folder, worldName], 300000);
+    res.download(outFile, `${worldName}.tar.gz`, err => {
+      fs.rmSync(outFile, { force: true });
+      if (err && !res.headersSent) res.status(500).json({ error: err.message });
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/servers/:id/installer', auth, async (req, res) => {

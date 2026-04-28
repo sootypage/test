@@ -398,6 +398,19 @@ app.post('/servers/:id/saves/upload', requireLogin, writeLimiter, upload.single(
   res.redirect(`/servers/${ctx.server.id}#saves`);
 });
 
+
+app.get('/servers/:id/saves/download', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  const worldName = req.query.worldName || 'world';
+  try {
+    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/saves/download?worldName=${encodeURIComponent(worldName)}`, { timeout: TIMEOUT * 120 });
+    if (!response.ok) throw new Error((await response.text()) || `World download failed: HTTP ${response.status}`);
+    res.setHeader('Content-Disposition', response.headers.get('content-disposition') || `attachment; filename="${worldName}.tar.gz"`);
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/gzip');
+    response.body.pipe(res);
+  } catch (e) { req.flash('error', e.message); res.redirect(`/servers/${ctx.server.id}#saves`); }
+});
+
 app.post('/servers/:id/backups/create', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   try { await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`, { method: 'POST', timeout: TIMEOUT * 60 }); req.flash('success', 'Backup created.'); }

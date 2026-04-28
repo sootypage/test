@@ -157,6 +157,15 @@
       <div class="span"><button class="primary">Upload save</button></div>
     </form>
     <p class="muted small">Supported: .zip, .tar.gz, .tgz. Stop the server before replacing a world to avoid file corruption.</p>
+
+    <hr class="soft-sep">
+    <h3>Download world folder</h3>
+    <form method="get" action="/servers/<%= server.id %>/saves/download" class="form settings-grid">
+      <label>World folder name</label>
+      <input name="worldName" value="world" placeholder="world">
+      <div class="span"><button class="primary">Download world folder</button></div>
+    </form>
+    <p class="muted small">Downloads the chosen world folder as a .tar.gz file, for example <code>world.tar.gz</code>.</p>
   </div>
 </section>
 
