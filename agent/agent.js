@@ -162,7 +162,21 @@ function defaultEnv(memoryMb, name) {
 function buildDockerArgs(server) {
   const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   env.MEMORY = env.MEMORY || `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
-  const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1), '-p', `${server.port}:25565`, '-v', `${server.folder}:/data`];
+  const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1)];
+  const bindings = new Set();
+  function addBinding(publicPort, containerPort, protocol) {
+    const pub = Number(publicPort);
+    const con = Number(containerPort);
+    const proto = String(protocol || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
+    if (!pub || !con || pub < 1 || pub > 65535 || con < 1 || con > 65535) return;
+    const key = `${pub}:${con}/${proto}`;
+    if (bindings.has(key)) return;
+    bindings.add(key);
+    args.push('-p', key);
+  }
+  addBinding(server.port || 25565, 25565, 'tcp');
+  for (const p of (server.networkPorts || [])) addBinding(p.port, p.containerPort || p.port, p.protocol || p.type || 'tcp');
+  args.push('-v', `${server.folder}:/data`);
   for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${String(value)}`);
   args.push(server.image || 'itzg/minecraft-server:java21');
   return args;
@@ -204,6 +218,7 @@ function serverSettings(server) {
   const props = readProperties(server);
   const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   return {
+    serverType: String(env.TYPE || 'PAPER').toLowerCase(),
     version: env.VERSION || 'LATEST',
     motd: props.motd || env.MOTD || server.name,
     seed: props['level-seed'] || '',
@@ -249,7 +264,7 @@ app.post('/servers', auth, async (req, res) => {
   const containerName = `amp-${safeName(name)}-${serverId.slice(0, 8)}`;
   const env = Object.assign(defaultEnv(memoryMb, name), req.body.env || {});
 
-  const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, env, game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
+  const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, env, networkPorts: req.body.networkPorts || [], game: req.body.game || `minecraft-${String(env.TYPE || 'paper').toLowerCase()}`, createdAt: new Date().toISOString() };
 
   try {
     await docker(buildDockerArgs(server));
@@ -332,10 +347,16 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
   if (index === -1) return res.status(404).json({ error: 'Server not found.' });
   const server = db.servers[index];
   const currentVersion = (server.env && server.env.VERSION) || 'LATEST';
+  const currentType = String((server.env && server.env.TYPE) || 'PAPER').toUpperCase();
   const nextVersion = String(req.body.version || currentVersion).trim() || currentVersion;
+  const allowedTypes = new Set(['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA']);
+  const requestedType = String(req.body.serverType || req.body.type || currentType).toUpperCase();
+  const nextType = allowedTypes.has(requestedType) ? requestedType : currentType;
 
   server.env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   server.env.VERSION = nextVersion;
+  server.env.TYPE = nextType;
+  server.game = `minecraft-${nextType.toLowerCase()}`;
   if (req.body.motd !== undefined) server.env.MOTD = String(req.body.motd || server.name);
   writeProperties(server, {
     motd: req.body.motd,
@@ -355,8 +376,59 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
   writeDb(db);
 
   try {
-    if (nextVersion !== currentVersion) await recreateContainer(server);
-    res.json({ ok: true, settings: serverSettings(server), recreated: nextVersion !== currentVersion });
+    const needsRecreate = nextVersion !== currentVersion || nextType !== currentType;
+    if (needsRecreate) await recreateContainer(server);
+    res.json({ ok: true, settings: serverSettings(server), recreated: needsRecreate, server });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+app.post('/servers/:id/resources', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  server.memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
+  server.cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
+  server.storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
+  server.env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  server.env.MEMORY = `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
+  db.servers[index] = server;
+  writeDb(db);
+  try { await recreateContainer(server); res.json({ ok: true, server, recreated: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/network/ports', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  server.networkPorts = (req.body.networkPorts || []).map(p => ({
+    id: p.id || id(),
+    port: Number(p.port),
+    containerPort: Number(p.containerPort || p.port),
+    protocol: String(p.protocol || p.type || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp',
+    notes: p.notes || ''
+  })).filter(p => p.port && p.containerPort && p.port >= 1 && p.port <= 65535 && p.containerPort >= 1 && p.containerPort <= 65535);
+  db.servers[index] = server;
+  writeDb(db);
+  try { await recreateContainer(server); res.json({ ok: true, server, recreated: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/servers/:id', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  try {
+    await removeContainer(server.containerName);
+    fs.rmSync(server.folder, { recursive: true, force: true });
+    fs.rmSync(serverBackupDir(server), { recursive: true, force: true });
+    db.servers.splice(index, 1);
+    writeDb(db);
+    res.json({ ok: true, deleted: server.id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

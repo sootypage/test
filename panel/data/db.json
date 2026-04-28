@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "7397a7c4-2f2b-471a-8c43-5ff17f42a1aa",
+      "email": "admin@example.com",
+      "name": "Admin",
+      "role": "admin",
+      "passwordHash": "$2a$10$L7bRYWKtahHI7eYIVNfqjeaObIbg9tKCBPHEyMBsdmxTDLvAUbh0S",
+      "subusers": [],
+      "networkPorts": [],
+      "databases": [],
+      "subdomains": [],
+      "createdAt": "2026-04-28T12:00:06.481Z"
+    }
+  ],
+  "nodes": [],
+  "servers": [],
+  "audit": [],
+  "apiKeys": [],
+  "plans": []
+}

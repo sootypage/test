@@ -319,6 +319,13 @@
     <% const s = settings && settings.settings ? settings.settings : {}; %>
     <% if (settings && settings.error) { %><p class="error"><%= settings.error %></p><% } %>
     <form method="post" action="/servers/<%= server.id %>/settings" class="form settings-grid">
+      <label>Server type</label>
+      <select name="serverType">
+        <% ['paper','purpur','fabric','forge','neoforge','vanilla'].forEach(v => { %>
+          <option value="<%= v %>" <%= String(s.serverType || 'paper').toLowerCase() === v ? 'selected' : '' %>><%= v.charAt(0).toUpperCase() + v.slice(1) %></option>
+        <% }) %>
+      </select>
+
       <label>Minecraft version</label>
       <input name="version" value="<%= s.version || 'LATEST' %>" placeholder="1.21.11 or LATEST">
 
@@ -379,7 +386,17 @@
         <button class="primary">Save settings</button>
       </div>
     </form>
-    <p class="muted small">Changing the version recreates the Docker container. Changing the world seed only affects a new world or a reset world.</p>
+    <p class="muted small">Changing the server type or version recreates the Docker container but keeps the same server files.</p>
+  </div>
+
+  <div class="card danger-zone">
+    <h2>Delete server</h2>
+    <p class="muted">This permanently deletes the Docker container, all server files, backups, and removes it from the panel.</p>
+    <form method="post" action="/servers/<%= server.id %>/delete" class="form settings-grid" onsubmit="return confirm('This will permanently delete this server and all files. Continue?')">
+      <label>Type server name</label>
+      <input name="confirmName" placeholder="<%= server.name %>" required>
+      <div class="span"><button class="danger">Delete this server forever</button></div>
+    </form>
   </div>
 </section>
 
@@ -422,15 +439,16 @@
     <div class="card-title-row"><h2>Network</h2><p class="muted">Main join address and extra port records.</p></div>
     <div class="chips"><span>Main IP: <%= server.ipAddress || 'not set' %></span><span>Main port: <%= server.port %></span></div>
     <form method="post" action="/servers/<%= server.id %>/network/ports" class="form settings-grid mt-12">
-      <label>Extra port</label><input name="port" type="number" min="1" max="65535" placeholder="25566" required>
-      <label>Type</label><select name="type"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
-      <label>Notes</label><input name="notes" placeholder="Voice chat, Dynmap, extra service">
-      <div class="span"><button class="primary">Add port record</button></div>
+      <label>Public port</label><input name="port" type="number" min="1" max="65535" placeholder="19132" required>
+      <label>Container port</label><input name="containerPort" type="number" min="1" max="65535" placeholder="19132" required>
+      <label>Protocol</label><select name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+      <label>Notes</label><input name="notes" placeholder="Geyser Bedrock, voice chat, Dynmap">
+      <div class="span"><button class="primary">Add port and recreate Docker container</button></div>
     </form>
-    <p class="muted small">This tracks ports for plans/orders. Live Docker rebinding for extra ports can be added next.</p>
-    <table><thead><tr><th>Port</th><th>Type</th><th>Notes</th><th>Actions</th></tr></thead><tbody>
+    <p class="muted small">Adding/removing a port safely recreates the Docker container with the same /data folder.</p>
+    <table><thead><tr><th>Public</th><th>Container</th><th>Protocol</th><th>Notes</th><th>Actions</th></tr></thead><tbody>
       <% (server.networkPorts || []).forEach(p => { %>
-        <tr><td><%= p.port %></td><td><%= p.type %></td><td><%= p.notes || '' %></td><td><form method="post" action="/servers/<%= server.id %>/network/ports/remove"><input type="hidden" name="port" value="<%= p.port %>"><button class="danger small-btn">Remove</button></form></td></tr>
+        <tr><td><%= p.port %></td><td><%= p.containerPort || p.port %></td><td><%= p.protocol || p.type || 'tcp' %></td><td><%= p.notes || '' %></td><td><form method="post" action="/servers/<%= server.id %>/network/ports/remove"><input type="hidden" name="port" value="<%= p.port %>"><input type="hidden" name="protocol" value="<%= p.protocol || p.type || 'tcp' %>"><button class="danger small-btn">Remove</button></form></td></tr>
       <% }) %>
     </tbody></table>
   </div>

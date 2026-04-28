@@ -432,6 +432,7 @@ app.post('/servers/:id/settings', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   try {
     const payload = {
+      serverType: req.body.serverType,
       version: req.body.version,
       motd: req.body.motd,
       seed: req.body.seed,
@@ -446,8 +447,17 @@ app.post('/servers/:id/settings', requireLogin, async (req, res) => {
       viewDistance: req.body.viewDistance,
       simulationDistance: req.body.simulationDistance
     };
-    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`, { method: 'POST', body: payload, timeout: TIMEOUT * 30 });
-    req.flash('success', 'Server settings updated. Version changes recreate the container.');
+    const result = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`, { method: 'POST', body: payload, timeout: TIMEOUT * 30 });
+    const dbServer = ctx.db.servers.find(s => s.id === ctx.server.id);
+    if (dbServer && result.server) {
+      dbServer.game = result.server.game || dbServer.game;
+      dbServer.image = result.server.image || dbServer.image;
+      dbServer.memoryMb = result.server.memoryMb || dbServer.memoryMb;
+      dbServer.cpuLimit = result.server.cpuLimit || dbServer.cpuLimit;
+      dbServer.storageLimitMb = result.server.storageLimitMb || dbServer.storageLimitMb;
+      writeDb(ctx.db);
+    }
+    req.flash('success', 'Server settings updated. Version/type changes recreate the container.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect(`/servers/${ctx.server.id}#settings`);
 });
@@ -598,17 +608,28 @@ app.post('/servers/:id/network/ports', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   ctx.server.networkPorts = ctx.server.networkPorts || [];
   const port = Number(req.body.port);
-  if (!port || port < 1 || port > 65535) { req.flash('error', 'Invalid port.'); return res.redirect(`/servers/${ctx.server.id}#network`); }
-  if (!ctx.server.networkPorts.some(p => Number(p.port) === port)) ctx.server.networkPorts.push({ port, type: req.body.type || 'tcp', notes: req.body.notes || '', subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
-  writeDb(ctx.db);
-  req.flash('success', 'Network port added to the server record. Add Docker port binding support before using it live.');
+  const containerPort = Number(req.body.containerPort || req.body.port);
+  const protocol = String(req.body.protocol || req.body.type || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
+  if (!port || port < 1 || port > 65535 || !containerPort || containerPort < 1 || containerPort > 65535) { req.flash('error', 'Invalid port.'); return res.redirect(`/servers/${ctx.server.id}#network`); }
+  const exists = ctx.server.networkPorts.some(p => Number(p.port) === port && String(p.protocol || p.type || 'tcp').toLowerCase() === protocol);
+  if (!exists) ctx.server.networkPorts.push({ id: uuidv4(), port, containerPort, protocol, type: protocol, notes: req.body.notes || '', createdAt: new Date().toISOString() });
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/network/ports`, { method: 'POST', body: { networkPorts: ctx.server.networkPorts }, timeout: TIMEOUT * 60 });
+    writeDb(ctx.db);
+    req.flash('success', 'Network port added and Docker container recreated safely with the new binding.');
+  } catch (e) { req.flash('error', e.message); }
   res.redirect(`/servers/${ctx.server.id}#network`);
 });
 app.post('/servers/:id/network/ports/remove', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  ctx.server.networkPorts = (ctx.server.networkPorts || []).filter(p => String(p.port) !== String(req.body.port));
-  writeDb(ctx.db);
-  req.flash('success', 'Network port removed.');
+  const port = String(req.body.port);
+  const protocol = String(req.body.protocol || req.body.type || 'tcp').toLowerCase();
+  ctx.server.networkPorts = (ctx.server.networkPorts || []).filter(p => !(String(p.port) === port && String(p.protocol || p.type || 'tcp').toLowerCase() === protocol));
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/network/ports`, { method: 'POST', body: { networkPorts: ctx.server.networkPorts }, timeout: TIMEOUT * 60 });
+    writeDb(ctx.db);
+    req.flash('success', 'Network port removed and Docker container recreated safely.');
+  } catch (e) { req.flash('error', e.message); }
   res.redirect(`/servers/${ctx.server.id}#network`);
 });
 app.post('/servers/:id/databases', requireLogin, async (req, res) => {
@@ -747,6 +768,34 @@ app.post('/servers/:id/subdomains/remove', requireLogin, async (req, res) => {
   res.redirect(`/servers/${ctx.server.id}#subdomains`);
 });
 
+app.post('/servers/:id/delete', requireLogin, writeLimiter, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  if (ctx.user.role !== 'admin' && ctx.server.ownerId !== ctx.user.id) {
+    req.flash('error', 'Only the server owner or an admin can delete this server.');
+    return res.redirect(`/servers/${ctx.server.id}#settings`);
+  }
+  const confirmName = String(req.body.confirmName || '').trim();
+  if (confirmName !== ctx.server.name) {
+    req.flash('error', 'Type the exact server name to confirm deletion.');
+    return res.redirect(`/servers/${ctx.server.id}#settings`);
+  }
+  try {
+    for (const subdomain of (ctx.server.subdomains || [])) {
+      await deleteCloudflareRecord(subdomain.cloudflareSrvRecordId).catch(() => {});
+      await deleteCloudflareRecord(subdomain.cloudflareRecordId).catch(() => {});
+    }
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}`, { method: 'DELETE', timeout: TIMEOUT * 120 });
+    ctx.db.servers = ctx.db.servers.filter(s => s.id !== ctx.server.id);
+    writeDb(ctx.db);
+    addAudit('server.delete', { serverId: ctx.server.id, name: ctx.server.name, by: ctx.user.email });
+    req.flash('success', 'Server deleted. Docker container, server files, backups, and panel record were removed.');
+    res.redirect('/dashboard');
+  } catch (e) {
+    req.flash('error', `Delete failed: ${e.message}`);
+    res.redirect(`/servers/${ctx.server.id}#settings`);
+  }
+});
+
 app.use('/api/', apiLimiter);
 app.get('/api/servers', requireApiPermission('servers:list'), (req, res) => {
   const db = readDb();
@@ -786,8 +835,8 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
     const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const name = req.body.serverName || `${user.name || 'server'}-${Date.now()}`;
-    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: req.body.game || 'minecraft-paper', image: req.body.image || 'itzg/minecraft-server:java21', memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: req.body.type || 'PAPER', VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
-    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || 'minecraft-paper', ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
+    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, image: req.body.image || 'itzg/minecraft-server:java21', memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: String(req.body.serverType || req.body.type || 'PAPER').toUpperCase(), VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
+    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
     db.servers.push(panelServer);
     writeDb(db);
     res.json({ ok: true, user: { id: user.id, email: user.email, created: !!plainPassword, password: plainPassword }, server: panelServer });
@@ -840,7 +889,7 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
       port,
       env: {
         EULA: 'TRUE',
-        TYPE: 'PAPER',
+        TYPE: String(req.body.serverType || 'PAPER').toUpperCase(),
         VERSION: version,
         MEMORY: `${Math.floor(memoryMb * 0.85)}M`,
         ENABLE_RCON: 'true',
@@ -848,10 +897,35 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
         MOTD: req.body.name || 'Minecraft Server'
       }
     }});
-    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || 'minecraft-paper', ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
+    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
     writeDb(db); req.flash('success', 'Server created on node.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect('/admin');
+});
+
+
+app.post('/admin/servers/:id/resources', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) { req.flash('error', 'Server not found.'); return res.redirect('/admin#overview'); }
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  if (!node) { req.flash('error', 'Server node not found.'); return res.redirect('/admin#overview'); }
+  const memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
+  const cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
+  const storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
+  if (memoryMb < 256 || cpuLimit <= 0 || storageLimitMb < 1024) {
+    req.flash('error', 'Invalid resource limits.');
+    return res.redirect('/admin#resources');
+  }
+  try {
+    const result = await callAgent(node, `/servers/${server.agentServerId}/resources`, { method: 'POST', body: { memoryMb, cpuLimit, storageLimitMb }, timeout: TIMEOUT * 60 });
+    server.memoryMb = memoryMb;
+    server.cpuLimit = cpuLimit;
+    server.storageLimitMb = storageLimitMb;
+    writeDb(db);
+    req.flash('success', `Resources updated for ${server.name}. Docker container was recreated safely.`);
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect('/admin#resources');
 });
 
 

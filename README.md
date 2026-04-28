@@ -309,3 +309,20 @@ Security notes:
 - The token is stored only in `panel/.env` and is never displayed in the panel UI.
 
 The panel allows one subdomain per server and checks all existing server records before saving. If a hostname is already used, it will reject it as taken.
+
+## Update notes - server delete, resources, and server type
+
+This build adds:
+
+- Owner/admin server deletion from the server Settings tab. It removes the Docker container, server files, backups, and the panel record.
+- Admin server resource editing from Admin -> Server resources. Changing RAM/CPU/storage recreates the Docker container safely while keeping the same `/data` folder.
+- Server type selection in the server Settings tab. You can switch between Paper, Purpur, Fabric, Forge, NeoForge, and Vanilla. Changing type or version recreates the container while keeping server files.
+- Network port changes recreate the Docker container with the new port bindings while keeping the same server files.
+
+After updating, run:
+
+```bash
+cd /opt/custom-amp/custom-amp-ubuntu-panel/panel && npm install
+cd /opt/custom-amp/custom-amp-ubuntu-panel/agent && npm install
+sudo systemctl restart custom-amp-panel custom-amp-agent
+```

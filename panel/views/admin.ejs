@@ -11,6 +11,7 @@
   <button class="tab-btn" data-tab="nodes">Nodes</button>
   <button class="tab-btn" data-tab="users">Users</button>
   <button class="tab-btn" data-tab="servers">Create server</button>
+  <button class="tab-btn" data-tab="resources">Server resources</button>
   <button class="tab-btn" data-tab="plans">Plans</button>
   <button class="tab-btn" data-tab="api">API / Website</button>
   <button class="tab-btn" data-tab="security">Security</button>
@@ -66,11 +67,12 @@
 
 <section id="tab-servers" class="tab-panel">
   <div class="card">
-    <h2>Create Minecraft Paper server</h2>
+    <h2>Create Minecraft server</h2>
     <form method="post" action="/admin/servers" class="form two-col">
       <label>Server name</label><input name="name" required placeholder="survival-1">
       <label>Owner</label><select name="ownerId" required><% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %></select>
       <label>Node</label><select name="nodeId" required><% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %></select>
+      <label>Server type</label><select name="serverType"><option value="paper">Paper</option><option value="purpur">Purpur</option><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="neoforge">NeoForge</option><option value="vanilla">Vanilla</option></select>
       <label>Game</label><input name="game" value="minecraft-paper">
       <label>Docker image</label><input name="image" value="itzg/minecraft-server:java21">
       <label>Minecraft version</label><input name="version" value="LATEST">
@@ -81,6 +83,30 @@
       <label>Public port</label><input name="port" type="number" value="25565">
       <button class="primary span">Create server</button>
     </form>
+  </div>
+</section>
+
+<section id="tab-resources" class="tab-panel">
+  <div class="card">
+    <h2>Edit server resources</h2>
+    <p class="muted">Change RAM, CPU, and storage limits for existing servers. This recreates the Docker container safely and keeps the same files.</p>
+    <table>
+      <thead><tr><th>Server</th><th>Owner</th><th>RAM MB</th><th>CPU</th><th>Storage MB</th><th>Action</th></tr></thead>
+      <tbody>
+      <% db.servers.forEach(s => { const owner = db.users.find(u => u.id === s.ownerId); %>
+        <tr>
+          <form method="post" action="/admin/servers/<%= s.id %>/resources">
+            <td><a href="/servers/<%= s.id %>"><%= s.name %></a></td>
+            <td><%= owner ? owner.email : s.ownerId %></td>
+            <td><input name="memoryMb" type="number" value="<%= s.memoryMb || 2048 %>" min="256"></td>
+            <td><input name="cpuLimit" type="number" step="0.25" value="<%= s.cpuLimit || 1 %>" min="0.25"></td>
+            <td><input name="storageLimitMb" type="number" value="<%= s.storageLimitMb || 10240 %>" min="1024"></td>
+            <td><button class="primary small-btn">Save</button></td>
+          </form>
+        </tr>
+      <% }) %>
+      </tbody>
+    </table>
   </div>
 </section>
 
