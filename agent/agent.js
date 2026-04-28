@@ -248,6 +248,129 @@ app.get('/health', auth, async (req, res) => {
   res.json({ ok: true, name: AGENT_NAME, location: AGENT_LOCATION, dockerOk, dockerVersion, time: new Date().toISOString() });
 });
 
+function parsePortBindings(info) {
+  const ports = [];
+  const networkPorts = [];
+  const portMap = (info.NetworkSettings && info.NetworkSettings.Ports) || {};
+  for (const [containerKey, bindings] of Object.entries(portMap)) {
+    if (!Array.isArray(bindings) || !bindings.length) continue;
+    const [containerPortRaw, protoRaw] = containerKey.split('/');
+    const containerPort = Number(containerPortRaw);
+    const protocol = String(protoRaw || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
+    for (const binding of bindings) {
+      const publicPort = Number(binding.HostPort || 0);
+      if (!publicPort) continue;
+      ports.push({ publicPort, containerPort, protocol, hostIp: binding.HostIp || '' });
+      if (!(publicPort === 25565 && containerPort === 25565 && protocol === 'tcp')) {
+        networkPorts.push({ id: id(), port: publicPort, containerPort, protocol, notes: 'Imported from existing Docker container' });
+      }
+    }
+  }
+  return { ports, networkPorts };
+}
+function parseEnv(info) {
+  const env = {};
+  const list = (info.Config && info.Config.Env) || [];
+  for (const entry of list) {
+    const i = entry.indexOf('=');
+    if (i > 0) env[entry.slice(0, i)] = entry.slice(i + 1);
+  }
+  return env;
+}
+function containerSummaryFromInspect(info, importedIds = new Set()) {
+  const mounts = (info.Mounts || []).map(m => ({ source: m.Source, destination: m.Destination, type: m.Type }));
+  const dataMount = mounts.find(m => m.destination === '/data') || null;
+  const portInfo = parsePortBindings(info);
+  const env = parseEnv(info);
+  const state = info.State || {};
+  const memory = info.HostConfig && info.HostConfig.Memory ? Math.floor(Number(info.HostConfig.Memory) / 1024 / 1024) : 2048;
+  let cpuLimit = 1;
+  if (info.HostConfig && info.HostConfig.NanoCpus) cpuLimit = Number(info.HostConfig.NanoCpus) / 1e9;
+  else if (info.HostConfig && info.HostConfig.CpuQuota && info.HostConfig.CpuPeriod) cpuLimit = Number(info.HostConfig.CpuQuota) / Number(info.HostConfig.CpuPeriod);
+  const main = portInfo.ports.find(p => p.containerPort === 25565 && p.protocol === 'tcp') || portInfo.ports.find(p => p.protocol === 'tcp') || portInfo.ports[0] || null;
+  return {
+    dockerId: (info.Id || '').slice(0, 12),
+    name: String(info.Name || '').replace(/^\//, ''),
+    image: (info.Config && info.Config.Image) || '',
+    status: state.Status || 'unknown',
+    running: !!state.Running,
+    ports: portInfo.ports,
+    mainPort: main ? main.publicPort : 25565,
+    mainContainerPort: main ? main.containerPort : 25565,
+    mainProtocol: main ? main.protocol : 'tcp',
+    dataMount,
+    mounts,
+    env,
+    memoryMb: memory || 2048,
+    cpuLimit: cpuLimit || 1,
+    serverType: String(env.TYPE || 'PAPER').toLowerCase(),
+    version: env.VERSION || 'LATEST',
+    alreadyImported: importedIds.has(String(info.Name || '').replace(/^\//, ''))
+  };
+}
+
+
+app.get('/docker/containers', auth, async (req, res) => {
+  try {
+    const db = readDb();
+    const importedIds = new Set((db.servers || []).map(s => s.containerName));
+    const out = await docker(['ps', '-a', '--format', '{{.Names}}']);
+    const names = out.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const containers = [];
+    for (const name of names) {
+      try {
+        const inspect = await docker(['inspect', name], 30000);
+        const info = JSON.parse(inspect.stdout)[0];
+        containers.push(containerSummaryFromInspect(info, importedIds));
+      } catch (e) {
+        containers.push({ name, error: e.message });
+      }
+    }
+    res.json({ containers });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/servers/import', auth, async (req, res) => {
+  const db = readDb();
+  const containerName = String(req.body.containerName || '').trim();
+  if (!containerName) return res.status(400).json({ error: 'containerName is required.' });
+  if ((db.servers || []).some(s => s.containerName === containerName)) return res.status(409).json({ error: 'That Docker container is already imported.' });
+  try {
+    const inspect = await docker(['inspect', containerName], 30000);
+    const info = JSON.parse(inspect.stdout)[0];
+    const summary = containerSummaryFromInspect(info);
+    if (!summary.dataMount || !summary.dataMount.source) return res.status(400).json({ error: 'This container has no /data volume mount, so it cannot be safely imported.' });
+    const serverId = id();
+    const name = req.body.name || summary.name || `imported-${serverId.slice(0, 8)}`;
+    const memoryMb = Number(req.body.memoryMb || summary.memoryMb || 2048);
+    const cpuLimit = Number(req.body.cpuLimit || summary.cpuLimit || 1);
+    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+    const env = Object.assign(defaultEnv(memoryMb, name), summary.env || {}, req.body.env || {});
+    if (req.body.serverType) env.TYPE = String(req.body.serverType).toUpperCase();
+    const server = {
+      id: serverId,
+      name,
+      image: req.body.image || summary.image || 'itzg/minecraft-server:java21',
+      port: Number(req.body.port || summary.mainPort || 25565),
+      ipAddress: req.body.ipAddress || '',
+      memoryMb,
+      cpuLimit,
+      storageLimitMb,
+      containerName,
+      folder: summary.dataMount.source,
+      env,
+      networkPorts: summary.ports.filter(p => !(p.publicPort === Number(req.body.port || summary.mainPort || 25565) && p.containerPort === 25565 && p.protocol === 'tcp')).map(p => ({ id: id(), port: p.publicPort, containerPort: p.containerPort, protocol: p.protocol, notes: 'Imported from Docker' })),
+      game: req.body.game || `minecraft-${String(env.TYPE || 'paper').toLowerCase()}`,
+      importedFromDocker: true,
+      importedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString()
+    };
+    db.servers.push(server);
+    writeDb(db);
+    res.json({ ok: true, server, summary });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/servers', auth, async (req, res) => {
   const db = readDb();
   const serverId = id();

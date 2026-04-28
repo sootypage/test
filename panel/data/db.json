@@ -1,19 +1,29 @@
 {
   "users": [
     {
-      "id": "7397a7c4-2f2b-471a-8c43-5ff17f42a1aa",
+      "id": "726e2cd9-57f4-42bf-a256-c159b88a2d59",
       "email": "admin@example.com",
       "name": "Admin",
       "role": "admin",
-      "passwordHash": "$2a$10$L7bRYWKtahHI7eYIVNfqjeaObIbg9tKCBPHEyMBsdmxTDLvAUbh0S",
+      "passwordHash": "$2a$10$dvfpdb7NcvME4wTOvtwQFOrTwqOTZc3bTgNSyoyuLBfv6p0pcC9Ke",
       "subusers": [],
       "networkPorts": [],
       "databases": [],
       "subdomains": [],
-      "createdAt": "2026-04-28T12:00:06.481Z"
+      "createdAt": "2026-04-28T12:25:29.915Z"
     }
   ],
-  "nodes": [],
+  "nodes": [
+    {
+      "id": "aa7c2852-e9f1-47db-88c6-f36466de23e9",
+      "name": "node 1",
+      "url": "http://38.87.117.169:4100",
+      "publicIp": "38.87.117.169",
+      "token": "dc7894bc35915bf831018f932586ae3bc1e21b26fbf2ffd7ef1fa6944616eca8",
+      "location": "CogentDC - Frankfurt am Main - Germany",
+      "createdAt": "2026-04-28T12:26:50.880Z"
+    }
+  ],
   "servers": [],
   "audit": [],
   "apiKeys": [],

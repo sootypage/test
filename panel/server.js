@@ -844,7 +844,19 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
 });
 
 
-app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
+app.get('/admin', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  let importContainers = [];
+  let importNodeId = req.query.importNodeId || (db.nodes[0] && db.nodes[0].id) || '';
+  if (importNodeId) {
+    const node = db.nodes.find(n => n.id === importNodeId);
+    if (node) {
+      try { importContainers = (await callAgent(node, '/docker/containers')).containers || []; }
+      catch (e) { req.flash('error', `Could not scan Docker containers: ${e.message}`); }
+    }
+  }
+  res.render('admin', { title: 'Admin', db, importContainers, importNodeId });
+});
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
   const db = readDb();
   db.nodes.push({
@@ -866,6 +878,57 @@ app.post('/admin/users', requireLogin, requireAdmin, async (req, res) => {
   db.users.push({ id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: req.body.role || 'user', passwordHash: await bcrypt.hash(req.body.password || 'ChangeMe123!', 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
   writeDb(db); req.flash('success', 'User created.'); res.redirect('/admin');
 });
+
+app.post('/admin/import-container', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  const node = db.nodes.find(n => n.id === req.body.nodeId);
+  const owner = db.users.find(u => u.id === req.body.ownerId);
+  if (!node || !owner) { req.flash('error', 'Pick a valid node and owner.'); return res.redirect('/admin#import'); }
+  const containerName = String(req.body.containerName || '').trim();
+  if (!containerName) { req.flash('error', 'Container name is required.'); return res.redirect('/admin#import'); }
+  if (db.servers.some(s => s.nodeId === node.id && s.containerName === containerName)) {
+    req.flash('error', 'That Docker container is already imported into the panel.');
+    return res.redirect('/admin#import');
+  }
+  try {
+    const imported = await callAgent(node, '/servers/import', { method: 'POST', body: {
+      containerName,
+      name: req.body.name || containerName,
+      game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`,
+      serverType: req.body.serverType || 'paper',
+      image: req.body.image || undefined,
+      memoryMb: Number(req.body.memoryMb || 2048),
+      cpuLimit: Number(req.body.cpuLimit || 1),
+      storageLimitMb: Number(req.body.storageLimitMb || 10240),
+      ipAddress: req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url),
+      port: Number(req.body.port || 25565)
+    }, timeout: TIMEOUT * 30 });
+    db.servers.push({
+      id: uuidv4(),
+      agentServerId: imported.server.id,
+      name: req.body.name || imported.server.name || containerName,
+      game: req.body.game || imported.server.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`,
+      ownerId: owner.id,
+      nodeId: node.id,
+      memoryMb: imported.server.memoryMb || Number(req.body.memoryMb || 2048),
+      cpuLimit: imported.server.cpuLimit || Number(req.body.cpuLimit || 1),
+      storageLimitMb: imported.server.storageLimitMb || Number(req.body.storageLimitMb || 10240),
+      ipAddress: req.body.ipAddress || imported.server.ipAddress || node.publicIp || nodeHostFromUrl(node.url),
+      port: imported.server.port || Number(req.body.port || 25565),
+      subusers: [],
+      networkPorts: imported.server.networkPorts || [],
+      databases: [],
+      subdomains: [],
+      importedFromDocker: true,
+      importedContainerName: containerName,
+      createdAt: new Date().toISOString()
+    });
+    writeDb(db);
+    req.flash('success', `Imported Docker container ${containerName}. You can control it from the panel now.`);
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect('/admin#import');
+});
+
 app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
   const db = readDb();
   const node = db.nodes.find(n => n.id === req.body.nodeId);
