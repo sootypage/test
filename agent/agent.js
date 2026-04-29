@@ -47,6 +47,15 @@ function safePath(base, requested = '') {
 }
 function relPath(base, target) { return path.relative(base, target).replace(/\\/g, '/'); }
 
+function cleanConsoleLogs(logs) {
+  return String(logs || '')
+    .split(/\r?\n/)
+    .filter(line => !line.includes('ServerMain WARN Advanced terminal features are not available in this environment'))
+    .filter(line => !line.includes('Stopping with rcon-cli'))
+    .filter(line => !line.includes('Failed to stop using rcon-cli'))
+    .join('\n');
+}
+
 function docker(args, timeout = 120000) {
   return new Promise((resolve, reject) => {
     execFile('docker', args, { timeout, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
@@ -331,7 +340,7 @@ app.get('/servers/:id', auth, async (req, res) => {
   let logs = '';
   try {
     const out = await docker(['logs', '--tail', String(MAX_CONSOLE_LINES), server.containerName]);
-    logs = `${out.stdout || ''}${out.stderr || ''}`;
+    logs = cleanConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`);
   } catch (e) { logs = e.message; }
   res.json({ server, state, stats: await serverStats(server), settings: serverSettings(server), logs });
 });
@@ -342,7 +351,7 @@ app.get('/servers/:id/logs', auth, async (req, res) => {
   const lines = Math.min(Number(req.query.lines || MAX_CONSOLE_LINES), 50000);
   try {
     const out = await docker(['logs', '--tail', String(lines), server.containerName]);
-    res.json({ logs: `${out.stdout || ''}${out.stderr || ''}` });
+    res.json({ logs: cleanConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -666,5 +675,119 @@ app.post('/servers/:id/backups/restore', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+
+
+app.get('/docker/containers', auth, async (req, res) => {
+  try {
+    const db = readDb();
+    const out = await docker(['ps', '-a', '--format', '{{json .}}'], 60000);
+    const rows = out.stdout.trim() ? out.stdout.trim().split('\n').map(line => JSON.parse(line)) : [];
+    const containers = [];
+    for (const row of rows) {
+      let inspect = null;
+      try { inspect = JSON.parse((await docker(['inspect', row.ID], 60000)).stdout)[0]; } catch {}
+      const mounts = (inspect && inspect.Mounts ? inspect.Mounts : []).map(m => ({ source: m.Source, destination: m.Destination }));
+      const dataMount = mounts.find(m => m.destination === '/data');
+      const ports = [];
+      const rawPorts = inspect && inspect.NetworkSettings && inspect.NetworkSettings.Ports ? inspect.NetworkSettings.Ports : {};
+      for (const [containerPort, bindings] of Object.entries(rawPorts)) {
+        if (bindings) for (const b of bindings) ports.push({ publicPort: Number(b.HostPort), containerPort: Number(containerPort.split('/')[0]), protocol: containerPort.split('/')[1] || 'tcp' });
+      }
+      containers.push({
+        id: row.ID,
+        name: row.Names,
+        image: row.Image,
+        status: row.Status,
+        state: row.State,
+        ports,
+        mounts,
+        dataPath: dataMount ? dataMount.source : '',
+        canImport: !!dataMount,
+        imported: db.servers.some(s => s.containerName === row.Names || s.containerId === row.ID || s.folder === (dataMount ? dataMount.source : ''))
+      });
+    }
+    res.json({ containers });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/docker/import', auth, async (req, res) => {
+  try {
+    const containerRef = req.body.container || req.body.containerId || req.body.name;
+    if (!containerRef) return res.status(400).json({ error: 'Container is required.' });
+    const inspect = JSON.parse((await docker(['inspect', containerRef], 60000)).stdout)[0];
+    const containerName = String(inspect.Name || '').replace(/^\//, '');
+    const dataMount = (inspect.Mounts || []).find(m => m.Destination === '/data');
+    if (!dataMount) return res.status(400).json({ error: 'Cannot import: no /data mount.' });
+    const rawPorts = inspect.NetworkSettings && inspect.NetworkSettings.Ports ? inspect.NetworkSettings.Ports : {};
+    function findPort(containerPort, proto='tcp') { const b = rawPorts[`${containerPort}/${proto}`]; return b && b[0] ? Number(b[0].HostPort) : null; }
+    const publicPort = Number(req.body.port || findPort(25565, 'tcp') || findPort(25577, 'tcp') || findPort(28015, 'tcp') || 25565);
+    const networkPorts = [];
+    for (const [containerPort, bindings] of Object.entries(rawPorts)) {
+      if (!bindings) continue;
+      for (const b of bindings) {
+        const cPort = Number(containerPort.split('/')[0]);
+        const proto = containerPort.split('/')[1] || 'tcp';
+        const pPort = Number(b.HostPort);
+        if (pPort !== publicPort) networkPorts.push({ publicPort: pPort, containerPort: cPort, protocol: proto, name: `${proto.toUpperCase()} ${pPort}` });
+      }
+    }
+    const env = {};
+    for (const item of (inspect.Config.Env || [])) { const i = item.indexOf('='); if (i > -1) env[item.slice(0, i)] = item.slice(i + 1); }
+    const image = inspect.Config.Image || req.body.image || 'itzg/minecraft-server:java21';
+    const serverType = String(req.body.serverType || env.TYPE || (image.includes('mc-proxy') ? 'VELOCITY' : 'PAPER')).toUpperCase();
+    const server = {
+      id: req.body.id || id(),
+      name: req.body.name || containerName.replace(/^amp-/, ''),
+      image,
+      port: publicPort,
+      ipAddress: req.body.ipAddress || '',
+      memoryMb: Number(req.body.memoryMb || String(env.MEMORY || '').replace(/[^0-9]/g, '') || 2048),
+      cpuLimit: Number(req.body.cpuLimit || 1),
+      storageLimitMb: Number(req.body.storageLimitMb || 10240),
+      containerName,
+      containerId: inspect.Id,
+      folder: dataMount.Source,
+      env: Object.assign({}, env, { TYPE: serverType, VERSION: env.VERSION || req.body.version || 'LATEST' }),
+      networkPorts,
+      game: req.body.game || (serverType === 'RUST' ? 'rust' : `minecraft-${serverType.toLowerCase()}`),
+      imported: true,
+      createdAt: new Date().toISOString()
+    };
+    const db = readDb();
+    const existing = db.servers.find(s => s.containerName === containerName || s.folder === server.folder);
+    if (existing) Object.assign(existing, server, { id: existing.id }); else db.servers.push(server);
+    writeDb(db);
+    res.json({ ok: true, server: existing || server });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/resources', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  server.memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
+  server.cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
+  server.storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
+  if (req.body.port) server.port = Number(req.body.port);
+  db.servers[index] = server;
+  writeDb(db);
+  try { await recreateContainer(server); res.json({ ok: true, server, recreated: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/delete', auth, async (req, res) => {
+  const db = readDb();
+  const index = db.servers.findIndex(s => s.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
+  const server = db.servers[index];
+  try { await docker(['rm', '-f', server.containerName], 120000); } catch {}
+  try { if (server.folder) fs.rmSync(server.folder, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(serverBackupDir(server), { recursive: true, force: true }); } catch {}
+  db.servers.splice(index, 1);
+  writeDb(db);
+  res.json({ ok: true, deleted: server.id });
+});
 
 app.listen(PORT, () => console.log(`${AGENT_NAME} agent running on port ${PORT}`));

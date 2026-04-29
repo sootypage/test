@@ -168,6 +168,13 @@
       <div class="span"><button class="primary">Upload save</button></div>
     </form>
     <p class="muted small">Supported: .zip, .tar.gz, .tgz. Stop the server before replacing a world to avoid file corruption.</p>
+    <hr class="soft-sep">
+    <h3>Download world folder</h3>
+    <form method="get" action="/servers/<%= server.id %>/saves/world/download" class="form settings-grid">
+      <label>World folder name</label>
+      <input name="worldName" value="world" placeholder="world">
+      <div class="span"><button>Download world as .tar.gz</button></div>
+    </form>
   </div>
 </section>
 
@@ -398,6 +405,14 @@
       </div>
     </form>
     <p class="muted small">Changing the version recreates the Docker container. Changing the world seed only affects a new world or a reset world.</p>
+    <hr class="soft-sep">
+    <h3 class="danger-text">Danger zone</h3>
+    <p class="muted small">Deleting this server removes the Docker container, files, backups, and the panel record. Type the server name to confirm.</p>
+    <form method="post" action="/servers/<%= server.id %>/delete" class="form settings-grid" onsubmit="return confirm('Delete this server forever? This removes the Docker container and all files.')">
+      <label>Type server name</label>
+      <input name="confirmName" placeholder="<%= server.name %>" required>
+      <div class="span"><button class="danger">Delete server forever</button></div>
+    </form>
   </div>
 </section>
 

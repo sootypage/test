@@ -11,6 +11,8 @@
   <button class="tab-btn" data-tab="nodes">Nodes</button>
   <button class="tab-btn" data-tab="users">Users</button>
   <button class="tab-btn" data-tab="servers">Create server</button>
+  <button class="tab-btn" data-tab="resources">Server resources</button>
+  <button class="tab-btn" data-tab="import">Import Docker</button>
   <button class="tab-btn" data-tab="plans">Plans</button>
   <button class="tab-btn" data-tab="api">API / Website</button>
   <button class="tab-btn" data-tab="security">Security</button>
@@ -105,6 +107,49 @@
       <label>Server IP</label><input name="ipAddress" placeholder="Leave blank to use node public IP">
       <label>Public port</label><input name="port" type="number" value="25565">
       <button class="primary span">Create server</button>
+    </form>
+  </div>
+</section>
+
+
+<section id="tab-resources" class="tab-panel">
+  <div class="card">
+    <h2>Edit server resources</h2>
+    <p class="muted">Changing RAM/CPU/port recreates the Docker container but keeps the same /data files.</p>
+    <table><thead><tr><th>Server</th><th>Owner</th><th>RAM MB</th><th>CPU</th><th>Storage MB</th><th>Port</th><th>Save</th></tr></thead><tbody>
+      <% db.servers.forEach(s => { const owner = db.users.find(u => u.id === s.ownerId); %>
+        <tr>
+          <td><%= s.name %></td>
+          <td><%= owner ? owner.email : s.ownerId %></td>
+          <form method="post" action="/admin/servers/<%= s.id %>/resources">
+            <td><input name="memoryMb" type="number" value="<%= s.memoryMb || 2048 %>"></td>
+            <td><input name="cpuLimit" type="number" step="0.25" value="<%= s.cpuLimit || 1 %>"></td>
+            <td><input name="storageLimitMb" type="number" value="<%= s.storageLimitMb || 10240 %>"></td>
+            <td><input name="port" type="number" value="<%= s.port || 25565 %>"></td>
+            <td><button class="small-btn">Save</button></td>
+          </form>
+        </tr>
+      <% }) %>
+    </tbody></table>
+  </div>
+</section>
+
+<section id="tab-import" class="tab-panel">
+  <div class="card">
+    <h2>Import existing Docker container</h2>
+    <p class="muted">Import old Docker servers into the panel without deleting their files. The container needs a /data mount.</p>
+    <form method="post" action="/admin/import-docker" class="form two-col">
+      <label>Node</label><select name="nodeId"><% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %></select>
+      <label>Owner</label><select name="ownerId"><% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %></select>
+      <label>Container name or ID</label><input name="container" required placeholder="amp-warsmp-xxxx or c85336af2695">
+      <label>Panel server name</label><input name="name" required placeholder="warsmp">
+      <label>Server type</label><select name="serverType"><% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','VELOCITY','BUNGEECORD','WATERFALL','RUST'].forEach(t => { %><option value="<%= t %>"><%= t %></option><% }) %></select>
+      <label>Public IP</label><input name="ipAddress" placeholder="Leave blank to use node public IP">
+      <label>Main public port</label><input name="port" type="number" placeholder="25565 / 25566 / 28015">
+      <label>RAM MB</label><input name="memoryMb" type="number" value="2048">
+      <label>CPU</label><input name="cpuLimit" type="number" step="0.25" value="1">
+      <label>Storage MB</label><input name="storageLimitMb" type="number" value="10240">
+      <button class="primary span">Import container</button>
     </form>
   </div>
 </section>

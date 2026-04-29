@@ -429,6 +429,19 @@ app.post('/servers/:id/saves/upload', requireLogin, writeLimiter, upload.single(
   res.redirect(`/servers/${ctx.server.id}#saves`);
 });
 
+
+app.get('/servers/:id/saves/world/download', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  const worldName = req.query.worldName || 'world';
+  try {
+    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files/download?path=${encodeURIComponent(worldName)}`, { timeout: TIMEOUT * 60 });
+    if (!response.ok) throw new Error((await response.text()) || `World download failed: HTTP ${response.status}`);
+    res.setHeader('Content-Disposition', response.headers.get('content-disposition') || `attachment; filename="${worldName}.tar.gz"`);
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/gzip');
+    response.body.pipe(res);
+  } catch (e) { req.flash('error', e.message); res.redirect(`/servers/${ctx.server.id}#saves`); }
+});
+
 app.post('/servers/:id/backups/create', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   try { await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`, { method: 'POST', timeout: TIMEOUT * 60 }); req.flash('success', 'Backup created.'); }
@@ -829,6 +842,87 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+
+app.post('/servers/:id/delete', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  const confirmName = String(req.body.confirmName || '').trim();
+  if (confirmName !== ctx.server.name) { req.flash('error', 'Server name confirmation did not match.'); return res.redirect(`/servers/${ctx.server.id}#settings`); }
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/delete`, { method: 'POST', timeout: TIMEOUT * 60 });
+    ctx.db.servers = ctx.db.servers.filter(s => s.id !== ctx.server.id);
+    writeDb(ctx.db);
+    req.flash('success', 'Server deleted. Docker container, files, and backups were removed.');
+    return res.redirect('/dashboard');
+  } catch (e) { req.flash('error', e.message); return res.redirect(`/servers/${ctx.server.id}#settings`); }
+});
+
+
+app.get('/admin/import-docker/containers', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  const node = db.nodes.find(n => n.id === req.query.nodeId) || db.nodes[0];
+  if (!node) return res.status(400).json({ error: 'Add a node first.' });
+  try { res.json(await callAgent(node, '/docker/containers', { timeout: TIMEOUT * 3 })); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/admin/import-docker', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  const node = db.nodes.find(n => n.id === req.body.nodeId) || db.nodes[0];
+  const owner = db.users.find(u => u.id === req.body.ownerId);
+  if (!node || !owner) { req.flash('error', 'Pick a valid node and owner.'); return res.redirect('/admin#import'); }
+  try {
+    const imported = await callAgent(node, '/docker/import', { method: 'POST', timeout: TIMEOUT * 5, body: {
+      container: req.body.container,
+      name: req.body.name,
+      serverType: req.body.serverType,
+      memoryMb: req.body.memoryMb,
+      cpuLimit: req.body.cpuLimit,
+      storageLimitMb: req.body.storageLimitMb,
+      port: req.body.port,
+      ipAddress: req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url)
+    }});
+    const agentServer = imported.server;
+    const existing = db.servers.find(s => s.agentServerId === agentServer.id || s.name === req.body.name);
+    const panelRecord = {
+      id: existing ? existing.id : uuidv4(),
+      agentServerId: agentServer.id,
+      name: req.body.name || agentServer.name,
+      game: agentServer.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`,
+      ownerId: owner.id,
+      nodeId: node.id,
+      memoryMb: Number(req.body.memoryMb || agentServer.memoryMb || 2048),
+      cpuLimit: Number(req.body.cpuLimit || agentServer.cpuLimit || 1),
+      storageLimitMb: Number(req.body.storageLimitMb || agentServer.storageLimitMb || 10240),
+      ipAddress: req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url),
+      port: Number(req.body.port || agentServer.port || 25565),
+      networkPorts: agentServer.networkPorts || [],
+      subusers: [], databases: [], subdomains: [], imported: true,
+      createdAt: existing ? existing.createdAt : new Date().toISOString()
+    };
+    if (existing) Object.assign(existing, panelRecord); else db.servers.push(panelRecord);
+    writeDb(db);
+    req.flash('success', 'Docker container imported into the panel.');
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect('/admin#import');
+});
+
+app.post('/admin/servers/:id/resources', requireLogin, requireAdmin, async (req, res) => {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) { req.flash('error', 'Server not found.'); return res.redirect('/admin#resources'); }
+  const node = db.nodes.find(n => n.id === server.nodeId);
+  if (!node) { req.flash('error', 'Node not found.'); return res.redirect('/admin#resources'); }
+  server.memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
+  server.cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
+  server.storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
+  if (req.body.port) server.port = Number(req.body.port);
+  try { await callAgent(node, `/servers/${server.agentServerId}/resources`, { method: 'POST', timeout: TIMEOUT * 10, body: { memoryMb: server.memoryMb, cpuLimit: server.cpuLimit, storageLimitMb: server.storageLimitMb, port: server.port } }); }
+  catch (e) { req.flash('error', `Saved in panel but agent failed to recreate container: ${e.message}`); }
+  writeDb(db);
+  req.flash('success', 'Server resources updated.');
+  res.redirect('/admin#resources');
+});
 
 app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
