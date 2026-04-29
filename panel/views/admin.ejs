@@ -11,8 +11,6 @@
   <button class="tab-btn" data-tab="nodes">Nodes</button>
   <button class="tab-btn" data-tab="users">Users</button>
   <button class="tab-btn" data-tab="servers">Create server</button>
-  <button class="tab-btn" data-tab="import">Import Docker</button>
-  <button class="tab-btn" data-tab="resources">Server resources</button>
   <button class="tab-btn" data-tab="plans">Plans</button>
   <button class="tab-btn" data-tab="api">API / Website</button>
   <button class="tab-btn" data-tab="security">Security</button>
@@ -55,28 +53,52 @@
       <label>Email</label><input name="email" type="email" required>
       <label>Password</label><input name="password" type="text" required>
       <label>Role</label><select name="role"><option value="user">User</option><option value="admin">Admin</option></select>
+      <label>Subdomain slots</label><input name="subdomainSlots" type="number" value="1" min="0">
       <button class="primary span">Create user</button>
     </form>
   </div>
   <div class="card">
     <h2>Users</h2>
-    <table><thead><tr><th>Email</th><th>Name</th><th>Role</th></tr></thead><tbody>
-      <% db.users.forEach(u => { %><tr><td><%= u.email %></td><td><%= u.name %></td><td><%= u.role %></td></tr><% }) %>
+    <table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Subdomain slots</th><th>Actions</th></tr></thead><tbody>
+      <% db.users.forEach(u => { %>
+        <tr>
+          <td><%= u.email %></td><td><%= u.name %></td><td><%= u.role %></td>
+          <td><%= u.subdomainSlots || (u.role === 'admin' ? 999 : 1) %></td>
+          <td>
+            <form method="post" action="/admin/users/<%= u.id %>/resources" class="inline-form-wide">
+              <input name="subdomainSlots" type="number" min="0" value="<%= u.subdomainSlots || (u.role === 'admin' ? 999 : 1) %>">
+              <button class="small-btn">Save slots</button>
+            </form>
+          </td>
+        </tr>
+      <% }) %>
     </tbody></table>
   </div>
 </section>
 
 <section id="tab-servers" class="tab-panel">
   <div class="card">
-    <h2>Create Minecraft server</h2>
+    <h2>Create game server</h2>
     <form method="post" action="/admin/servers" class="form two-col">
       <label>Server name</label><input name="name" required placeholder="survival-1">
       <label>Owner</label><select name="ownerId" required><% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %></select>
       <label>Node</label><select name="nodeId" required><% db.nodes.forEach(n => { %><option value="<%= n.id %>"><%= n.name %> - <%= n.url %></option><% }) %></select>
-      <label>Server type</label><select name="serverType"><option value="paper">Paper</option><option value="purpur">Purpur</option><option value="fabric">Fabric</option><option value="forge">Forge</option><option value="neoforge">NeoForge</option><option value="vanilla">Vanilla</option></select>
-      <label>Game</label><input name="game" value="minecraft-paper">
-      <label>Docker image</label><input name="image" value="itzg/minecraft-server:java21">
-      <label>Minecraft version</label><input name="version" value="LATEST">
+      <label>Server type</label>
+      <select name="serverType">
+        <option value="PAPER">Paper</option>
+        <option value="PURPUR">Purpur</option>
+        <option value="FABRIC">Fabric</option>
+        <option value="FORGE">Forge</option>
+        <option value="NEOFORGE">NeoForge</option>
+        <option value="VANILLA">Vanilla</option>
+        <option value="VELOCITY">Velocity</option>
+        <option value="BUNGEECORD">BungeeCord</option>
+        <option value="WATERFALL">Waterfall</option>
+        <option value="RUST">Rust</option>
+      </select>
+      <label>Game key</label><input name="game" placeholder="Leave blank to auto set from type">
+      <label>Docker image</label><input name="image" placeholder="Leave blank to auto set from type">
+      <label>Minecraft / game version</label><input name="version" value="LATEST">
       <label>Memory limit MB</label><input name="memoryMb" type="number" value="2048">
       <label>CPU limit</label><input name="cpuLimit" type="number" step="0.25" value="1">
       <label>Storage limit MB</label><input name="storageLimitMb" type="number" value="10240">
@@ -84,104 +106,6 @@
       <label>Public port</label><input name="port" type="number" value="25565">
       <button class="primary span">Create server</button>
     </form>
-  </div>
-</section>
-
-
-<section id="tab-import" class="tab-panel">
-  <div class="card">
-    <h2>Import old Docker containers</h2>
-    <p class="muted">Scan a node for existing Docker containers and import them into the panel without deleting files. The container needs a <code>/data</code> volume mount so the panel can safely manage it.</p>
-    <form method="get" action="/admin" class="form two-col">
-      <label>Node to scan</label>
-      <select name="importNodeId" required>
-        <% db.nodes.forEach(n => { %>
-          <option value="<%= n.id %>" <%= importNodeId === n.id ? 'selected' : '' %>><%= n.name %> - <%= n.url %></option>
-        <% }) %>
-      </select>
-      <button class="primary span">Scan Docker containers</button>
-    </form>
-  </div>
-
-  <div class="card">
-    <h2>Containers found</h2>
-    <% if (!db.nodes.length) { %>
-      <p class="muted">Add a node first.</p>
-    <% } else if (!(importContainers || []).length) { %>
-      <p class="muted">No Docker containers found, or the node could not be scanned.</p>
-    <% } else { %>
-      <table>
-        <thead><tr><th>Container</th><th>Status</th><th>Image</th><th>Ports</th><th>Data folder</th><th>Import</th></tr></thead>
-        <tbody>
-        <% (importContainers || []).forEach(c => { %>
-          <tr>
-            <td><strong><%= c.name %></strong><br><span class="muted small"><%= c.dockerId || '' %></span></td>
-            <td><%= c.status || 'unknown' %><% if (c.alreadyImported) { %><br><span class="status online">Already imported</span><% } %></td>
-            <td><%= c.image || '' %></td>
-            <td>
-              <% (c.ports || []).forEach(p => { %>
-                <div><%= p.publicPort %> → <%= p.containerPort %>/<%= p.protocol %></div>
-              <% }) %>
-            </td>
-            <td><span class="muted small"><%= c.dataMount && c.dataMount.source ? c.dataMount.source : 'No /data mount' %></span></td>
-            <td>
-              <% if (!c.alreadyImported && c.dataMount && c.dataMount.source) { %>
-                <form method="post" action="/admin/import-container" class="mini-form">
-                  <input type="hidden" name="nodeId" value="<%= importNodeId %>">
-                  <input type="hidden" name="containerName" value="<%= c.name %>">
-                  <label>Owner</label>
-                  <select name="ownerId" required>
-                    <% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %>
-                  </select>
-                  <label>Panel name</label>
-                  <input name="name" value="<%= c.name %>">
-                  <label>Server type</label>
-                  <select name="serverType">
-                    <% ['paper','purpur','fabric','forge','neoforge','vanilla'].forEach(t => { %><option value="<%= t %>" <%= (c.serverType || 'paper') === t ? 'selected' : '' %>><%= t %></option><% }) %>
-                  </select>
-                  <label>Main public port</label>
-                  <input name="port" type="number" value="<%= c.mainPort || 25565 %>">
-                  <label>RAM MB</label>
-                  <input name="memoryMb" type="number" value="<%= c.memoryMb || 2048 %>">
-                  <label>CPU</label>
-                  <input name="cpuLimit" type="number" step="0.25" value="<%= c.cpuLimit || 1 %>">
-                  <label>Storage MB</label>
-                  <input name="storageLimitMb" type="number" value="10240">
-                  <button class="primary">Import</button>
-                </form>
-              <% } else if (!c.dataMount || !c.dataMount.source) { %>
-                <span class="error small">Cannot import: no /data mount</span>
-              <% } %>
-            </td>
-          </tr>
-        <% }) %>
-        </tbody>
-      </table>
-    <% } %>
-  </div>
-</section>
-
-<section id="tab-resources" class="tab-panel">
-  <div class="card">
-    <h2>Edit server resources</h2>
-    <p class="muted">Change RAM, CPU, and storage limits for existing servers. This recreates the Docker container safely and keeps the same files.</p>
-    <table>
-      <thead><tr><th>Server</th><th>Owner</th><th>RAM MB</th><th>CPU</th><th>Storage MB</th><th>Action</th></tr></thead>
-      <tbody>
-      <% db.servers.forEach(s => { const owner = db.users.find(u => u.id === s.ownerId); %>
-        <tr>
-          <form method="post" action="/admin/servers/<%= s.id %>/resources">
-            <td><a href="/servers/<%= s.id %>"><%= s.name %></a></td>
-            <td><%= owner ? owner.email : s.ownerId %></td>
-            <td><input name="memoryMb" type="number" value="<%= s.memoryMb || 2048 %>" min="256"></td>
-            <td><input name="cpuLimit" type="number" step="0.25" value="<%= s.cpuLimit || 1 %>" min="0.25"></td>
-            <td><input name="storageLimitMb" type="number" value="<%= s.storageLimitMb || 10240 %>" min="1024"></td>
-            <td><button class="primary small-btn">Save</button></td>
-          </form>
-        </tr>
-      <% }) %>
-      </tbody>
-    </table>
   </div>
 </section>
 

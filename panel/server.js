@@ -164,6 +164,24 @@ const PLUGIN_CATALOG = [
   { type: 'mod', name: 'Sodium', description: 'Performance mod for Fabric.', url: 'https://cdn.modrinth.com/data/AANobbMI/versions/latest/Sodium.jar' }
 ];
 
+
+function gameTypeConfig(type) {
+  const key = String(type || 'PAPER').toUpperCase();
+  const map = {
+    PAPER: { game: 'minecraft-paper', image: 'itzg/minecraft-server:java21', envType: 'PAPER', defaultPort: 25565 },
+    PURPUR: { game: 'minecraft-purpur', image: 'itzg/minecraft-server:java21', envType: 'PURPUR', defaultPort: 25565 },
+    FABRIC: { game: 'minecraft-fabric', image: 'itzg/minecraft-server:java21', envType: 'FABRIC', defaultPort: 25565 },
+    FORGE: { game: 'minecraft-forge', image: 'itzg/minecraft-server:java21', envType: 'FORGE', defaultPort: 25565 },
+    NEOFORGE: { game: 'minecraft-neoforge', image: 'itzg/minecraft-server:java21', envType: 'NEOFORGE', defaultPort: 25565 },
+    VANILLA: { game: 'minecraft-vanilla', image: 'itzg/minecraft-server:java21', envType: 'VANILLA', defaultPort: 25565 },
+    VELOCITY: { game: 'minecraft-velocity', image: 'itzg/mc-proxy', envType: 'VELOCITY', defaultPort: 25577 },
+    BUNGEECORD: { game: 'minecraft-bungeecord', image: 'itzg/mc-proxy', envType: 'BUNGEECORD', defaultPort: 25577 },
+    WATERFALL: { game: 'minecraft-waterfall', image: 'itzg/mc-proxy', envType: 'WATERFALL', defaultPort: 25577 },
+    RUST: { game: 'rust', image: 'didstopia/rust-server:latest', envType: 'RUST', defaultPort: 28015 }
+  };
+  return map[key] || map.PAPER;
+}
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(TMP_DIR, { recursive: true });
 const upload = multer({ dest: TMP_DIR, limits: { fileSize: 1024 * 1024 * 1024 } });
@@ -197,7 +215,7 @@ async function bootstrapAdmin() {
   const email = process.env.ADMIN_EMAIL || 'admin@example.com';
   const password = process.env.ADMIN_PASSWORD || 'ChangeMe123!';
   if (!db.users.some(u => u.email === email)) {
-    db.users.push({ id: uuidv4(), email, name: 'Admin', role: 'admin', passwordHash: await bcrypt.hash(password, 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
+    db.users.push({ id: uuidv4(), email, name: 'Admin', role: 'admin', subdomainSlots: 999, passwordHash: await bcrypt.hash(password, 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
     writeDb(db);
     console.log(`Created admin user: ${email}`);
   }
@@ -343,19 +361,32 @@ app.get('/servers/:id/files/download', requireLogin, async (req, res) => {
     response.body.pipe(res);
   } catch (e) { req.flash('error', e.message); res.redirect(`/servers/${ctx.server.id}`); }
 });
-app.post('/servers/:id/files/upload', requireLogin, upload.single('file'), async (req, res) => {
+app.post('/servers/:id/files/upload', requireLogin, upload.array('files', 50), async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  const uploaded = req.files || [];
   try {
+    if (!uploaded.length) throw new Error('Pick at least one file to upload.');
     const form = new FormData();
     form.append('path', req.body.path || '');
-    form.append('file', fs.createReadStream(req.file.path), req.file.originalname);
-    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files/upload`, { method: 'POST', headers: form.getHeaders(), body: form, timeout: TIMEOUT * 30 });
+    if (req.body.extractZip) form.append('extractZip', 'true');
+    if (req.body.deleteZipAfterExtract) form.append('deleteZipAfterExtract', 'true');
+    for (const file of uploaded) form.append('files', fs.createReadStream(file.path), file.originalname);
+    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files/upload`, { method: 'POST', headers: form.getHeaders(), body: form, timeout: TIMEOUT * 60 });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || 'Upload failed.');
-    req.flash('success', 'File uploaded.');
+    req.flash('success', `${uploaded.length} file(s) uploaded${req.body.extractZip ? ' and ZIPs extracted' : ''}.`);
   } catch (e) { req.flash('error', e.message); }
-  finally { if (req.file) fs.rmSync(req.file.path, { force: true }); }
+  finally { for (const file of uploaded) fs.rmSync(file.path, { force: true }); }
   res.redirect(`/servers/${ctx.server.id}${req.body.path ? `?path=${encodeURIComponent(req.body.path)}` : ''}#files`);
+});
+
+app.post('/servers/:id/files/unzip', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try {
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files/unzip`, { method: 'POST', body: { path: req.body.path, destination: req.body.destination || '' }, timeout: TIMEOUT * 30 });
+    req.flash('success', 'ZIP extracted.');
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect(`/servers/${ctx.server.id}?path=${encodeURIComponent(req.body.currentPath || '')}#files`);
 });
 app.post('/servers/:id/files/mkdir', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
@@ -396,19 +427,6 @@ app.post('/servers/:id/saves/upload', requireLogin, writeLimiter, upload.single(
   } catch (e) { req.flash('error', e.message); }
   finally { if (req.file) fs.rmSync(req.file.path, { force: true }); }
   res.redirect(`/servers/${ctx.server.id}#saves`);
-});
-
-
-app.get('/servers/:id/saves/download', requireLogin, async (req, res) => {
-  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  const worldName = req.query.worldName || 'world';
-  try {
-    const response = await fetchAgent(ctx.node, `/servers/${ctx.server.agentServerId}/saves/download?worldName=${encodeURIComponent(worldName)}`, { timeout: TIMEOUT * 120 });
-    if (!response.ok) throw new Error((await response.text()) || `World download failed: HTTP ${response.status}`);
-    res.setHeader('Content-Disposition', response.headers.get('content-disposition') || `attachment; filename="${worldName}.tar.gz"`);
-    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/gzip');
-    response.body.pipe(res);
-  } catch (e) { req.flash('error', e.message); res.redirect(`/servers/${ctx.server.id}#saves`); }
 });
 
 app.post('/servers/:id/backups/create', requireLogin, async (req, res) => {
@@ -460,17 +478,8 @@ app.post('/servers/:id/settings', requireLogin, async (req, res) => {
       viewDistance: req.body.viewDistance,
       simulationDistance: req.body.simulationDistance
     };
-    const result = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`, { method: 'POST', body: payload, timeout: TIMEOUT * 30 });
-    const dbServer = ctx.db.servers.find(s => s.id === ctx.server.id);
-    if (dbServer && result.server) {
-      dbServer.game = result.server.game || dbServer.game;
-      dbServer.image = result.server.image || dbServer.image;
-      dbServer.memoryMb = result.server.memoryMb || dbServer.memoryMb;
-      dbServer.cpuLimit = result.server.cpuLimit || dbServer.cpuLimit;
-      dbServer.storageLimitMb = result.server.storageLimitMb || dbServer.storageLimitMb;
-      writeDb(ctx.db);
-    }
-    req.flash('success', 'Server settings updated. Version/type changes recreate the container.');
+    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`, { method: 'POST', body: payload, timeout: TIMEOUT * 30 });
+    req.flash('success', 'Server settings updated. Version changes recreate the container.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect(`/servers/${ctx.server.id}#settings`);
 });
@@ -621,28 +630,17 @@ app.post('/servers/:id/network/ports', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   ctx.server.networkPorts = ctx.server.networkPorts || [];
   const port = Number(req.body.port);
-  const containerPort = Number(req.body.containerPort || req.body.port);
-  const protocol = String(req.body.protocol || req.body.type || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
-  if (!port || port < 1 || port > 65535 || !containerPort || containerPort < 1 || containerPort > 65535) { req.flash('error', 'Invalid port.'); return res.redirect(`/servers/${ctx.server.id}#network`); }
-  const exists = ctx.server.networkPorts.some(p => Number(p.port) === port && String(p.protocol || p.type || 'tcp').toLowerCase() === protocol);
-  if (!exists) ctx.server.networkPorts.push({ id: uuidv4(), port, containerPort, protocol, type: protocol, notes: req.body.notes || '', createdAt: new Date().toISOString() });
-  try {
-    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/network/ports`, { method: 'POST', body: { networkPorts: ctx.server.networkPorts }, timeout: TIMEOUT * 60 });
-    writeDb(ctx.db);
-    req.flash('success', 'Network port added and Docker container recreated safely with the new binding.');
-  } catch (e) { req.flash('error', e.message); }
+  if (!port || port < 1 || port > 65535) { req.flash('error', 'Invalid port.'); return res.redirect(`/servers/${ctx.server.id}#network`); }
+  if (!ctx.server.networkPorts.some(p => Number(p.port) === port)) ctx.server.networkPorts.push({ port, type: req.body.type || 'tcp', notes: req.body.notes || '', subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
+  writeDb(ctx.db);
+  req.flash('success', 'Network port added to the server record. Add Docker port binding support before using it live.');
   res.redirect(`/servers/${ctx.server.id}#network`);
 });
 app.post('/servers/:id/network/ports/remove', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  const port = String(req.body.port);
-  const protocol = String(req.body.protocol || req.body.type || 'tcp').toLowerCase();
-  ctx.server.networkPorts = (ctx.server.networkPorts || []).filter(p => !(String(p.port) === port && String(p.protocol || p.type || 'tcp').toLowerCase() === protocol));
-  try {
-    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/network/ports`, { method: 'POST', body: { networkPorts: ctx.server.networkPorts }, timeout: TIMEOUT * 60 });
-    writeDb(ctx.db);
-    req.flash('success', 'Network port removed and Docker container recreated safely.');
-  } catch (e) { req.flash('error', e.message); }
+  ctx.server.networkPorts = (ctx.server.networkPorts || []).filter(p => String(p.port) !== String(req.body.port));
+  writeDb(ctx.db);
+  req.flash('success', 'Network port removed.');
   res.redirect(`/servers/${ctx.server.id}#network`);
 });
 app.post('/servers/:id/databases', requireLogin, async (req, res) => {
@@ -740,7 +738,10 @@ app.post('/servers/:id/subdomains', requireLogin, async (req, res) => {
     if (!target) throw new Error('Target IP or hostname is required.');
 
     ctx.server.subdomains = ctx.server.subdomains || [];
-    if (ctx.server.subdomains.length >= 1) throw new Error('This server already has a subdomain. Remove it before adding another one.');
+    const owner = ctx.db.users.find(u => u.id === ctx.server.ownerId) || ctx.user;
+    const slotLimit = Number(owner.subdomainSlots || 1);
+    const usedSlots = ctx.db.servers.filter(s => s.ownerId === owner.id).reduce((total, srv) => total + ((srv.subdomains || []).length), 0);
+    if (owner.role !== 'admin' && usedSlots >= slotLimit) throw new Error(`No subdomain slots left. Used ${usedSlots}/${slotLimit}. Ask an admin for more slots.`);
 
     const takenBy = ctx.db.servers.find(s => (s.subdomains || []).some(d => d.hostname === hostname));
     if (takenBy) throw new Error('That subdomain is taken by another server.');
@@ -779,34 +780,6 @@ app.post('/servers/:id/subdomains/remove', requireLogin, async (req, res) => {
     req.flash('error', `Subdomain removed failed: ${e.message}`);
   }
   res.redirect(`/servers/${ctx.server.id}#subdomains`);
-});
-
-app.post('/servers/:id/delete', requireLogin, writeLimiter, async (req, res) => {
-  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  if (ctx.user.role !== 'admin' && ctx.server.ownerId !== ctx.user.id) {
-    req.flash('error', 'Only the server owner or an admin can delete this server.');
-    return res.redirect(`/servers/${ctx.server.id}#settings`);
-  }
-  const confirmName = String(req.body.confirmName || '').trim();
-  if (confirmName !== ctx.server.name) {
-    req.flash('error', 'Type the exact server name to confirm deletion.');
-    return res.redirect(`/servers/${ctx.server.id}#settings`);
-  }
-  try {
-    for (const subdomain of (ctx.server.subdomains || [])) {
-      await deleteCloudflareRecord(subdomain.cloudflareSrvRecordId).catch(() => {});
-      await deleteCloudflareRecord(subdomain.cloudflareRecordId).catch(() => {});
-    }
-    await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}`, { method: 'DELETE', timeout: TIMEOUT * 120 });
-    ctx.db.servers = ctx.db.servers.filter(s => s.id !== ctx.server.id);
-    writeDb(ctx.db);
-    addAudit('server.delete', { serverId: ctx.server.id, name: ctx.server.name, by: ctx.user.email });
-    req.flash('success', 'Server deleted. Docker container, server files, backups, and panel record were removed.');
-    res.redirect('/dashboard');
-  } catch (e) {
-    req.flash('error', `Delete failed: ${e.message}`);
-    res.redirect(`/servers/${ctx.server.id}#settings`);
-  }
 });
 
 app.use('/api/', apiLimiter);
@@ -848,8 +821,8 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
     const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const name = req.body.serverName || `${user.name || 'server'}-${Date.now()}`;
-    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, image: req.body.image || 'itzg/minecraft-server:java21', memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: String(req.body.serverType || req.body.type || 'PAPER').toUpperCase(), VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
-    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
+    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').game, image: req.body.image || gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').image, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').envType, VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
+    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || 'minecraft-paper', ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
     db.servers.push(panelServer);
     writeDb(db);
     res.json({ ok: true, user: { id: user.id, email: user.email, created: !!plainPassword, password: plainPassword }, server: panelServer });
@@ -857,19 +830,7 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
 });
 
 
-app.get('/admin', requireLogin, requireAdmin, async (req, res) => {
-  const db = readDb();
-  let importContainers = [];
-  let importNodeId = req.query.importNodeId || (db.nodes[0] && db.nodes[0].id) || '';
-  if (importNodeId) {
-    const node = db.nodes.find(n => n.id === importNodeId);
-    if (node) {
-      try { importContainers = (await callAgent(node, '/docker/containers')).containers || []; }
-      catch (e) { req.flash('error', `Could not scan Docker containers: ${e.message}`); }
-    }
-  }
-  res.render('admin', { title: 'Admin', db, importContainers, importNodeId });
-});
+app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
   const db = readDb();
   db.nodes.push({
@@ -888,58 +849,18 @@ app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
 app.post('/admin/users', requireLogin, requireAdmin, async (req, res) => {
   const db = readDb();
   if (db.users.some(u => u.email.toLowerCase() === String(req.body.email).toLowerCase())) { req.flash('error', 'User already exists.'); return res.redirect('/admin'); }
-  db.users.push({ id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: req.body.role || 'user', passwordHash: await bcrypt.hash(req.body.password || 'ChangeMe123!', 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
+  db.users.push({ id: uuidv4(), email: req.body.email, name: req.body.name || req.body.email, role: req.body.role || 'user', subdomainSlots: Number(req.body.subdomainSlots || 1), passwordHash: await bcrypt.hash(req.body.password || 'ChangeMe123!', 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
   writeDb(db); req.flash('success', 'User created.'); res.redirect('/admin');
 });
 
-app.post('/admin/import-container', requireLogin, requireAdmin, async (req, res) => {
+app.post('/admin/users/:id/resources', requireLogin, requireAdmin, (req, res) => {
   const db = readDb();
-  const node = db.nodes.find(n => n.id === req.body.nodeId);
-  const owner = db.users.find(u => u.id === req.body.ownerId);
-  if (!node || !owner) { req.flash('error', 'Pick a valid node and owner.'); return res.redirect('/admin#import'); }
-  const containerName = String(req.body.containerName || '').trim();
-  if (!containerName) { req.flash('error', 'Container name is required.'); return res.redirect('/admin#import'); }
-  if (db.servers.some(s => s.nodeId === node.id && s.containerName === containerName)) {
-    req.flash('error', 'That Docker container is already imported into the panel.');
-    return res.redirect('/admin#import');
-  }
-  try {
-    const imported = await callAgent(node, '/servers/import', { method: 'POST', body: {
-      containerName,
-      name: req.body.name || containerName,
-      game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`,
-      serverType: req.body.serverType || 'paper',
-      image: req.body.image || undefined,
-      memoryMb: Number(req.body.memoryMb || 2048),
-      cpuLimit: Number(req.body.cpuLimit || 1),
-      storageLimitMb: Number(req.body.storageLimitMb || 10240),
-      ipAddress: req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url),
-      port: Number(req.body.port || 25565)
-    }, timeout: TIMEOUT * 30 });
-    db.servers.push({
-      id: uuidv4(),
-      agentServerId: imported.server.id,
-      name: req.body.name || imported.server.name || containerName,
-      game: req.body.game || imported.server.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`,
-      ownerId: owner.id,
-      nodeId: node.id,
-      memoryMb: imported.server.memoryMb || Number(req.body.memoryMb || 2048),
-      cpuLimit: imported.server.cpuLimit || Number(req.body.cpuLimit || 1),
-      storageLimitMb: imported.server.storageLimitMb || Number(req.body.storageLimitMb || 10240),
-      ipAddress: req.body.ipAddress || imported.server.ipAddress || node.publicIp || nodeHostFromUrl(node.url),
-      port: imported.server.port || Number(req.body.port || 25565),
-      subusers: [],
-      networkPorts: imported.server.networkPorts || [],
-      databases: [],
-      subdomains: [],
-      importedFromDocker: true,
-      importedContainerName: containerName,
-      createdAt: new Date().toISOString()
-    });
-    writeDb(db);
-    req.flash('success', `Imported Docker container ${containerName}. You can control it from the panel now.`);
-  } catch (e) { req.flash('error', e.message); }
-  res.redirect('/admin#import');
+  const user = db.users.find(u => u.id === req.params.id);
+  if (!user) { req.flash('error', 'User not found.'); return res.redirect('/admin#users'); }
+  user.subdomainSlots = Math.max(0, Number(req.body.subdomainSlots || 0));
+  writeDb(db);
+  req.flash('success', 'User resource slots updated.');
+  res.redirect('/admin#users');
 });
 
 app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
@@ -954,10 +875,13 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
     const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const version = req.body.version || 'LATEST';
+    const cfg = gameTypeConfig(req.body.serverType || req.body.type || 'PAPER');
+    const image = req.body.image || cfg.image;
+    const game = req.body.game || cfg.game;
     const created = await callAgent(node, '/servers', { method: 'POST', body: {
       name: req.body.name,
-      game: req.body.game || 'minecraft-paper',
-      image: req.body.image || 'itzg/minecraft-server:java21',
+      game,
+      image,
       memoryMb,
       cpuLimit,
       storageLimitMb,
@@ -965,7 +889,7 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
       port,
       env: {
         EULA: 'TRUE',
-        TYPE: String(req.body.serverType || 'PAPER').toUpperCase(),
+        TYPE: cfg.envType,
         VERSION: version,
         MEMORY: `${Math.floor(memoryMb * 0.85)}M`,
         ENABLE_RCON: 'true',
@@ -973,35 +897,10 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
         MOTD: req.body.name || 'Minecraft Server'
       }
     }});
-    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game: req.body.game || `minecraft-${String(req.body.serverType || 'paper').toLowerCase()}`, ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
+    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game, ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
     writeDb(db); req.flash('success', 'Server created on node.');
   } catch (e) { req.flash('error', e.message); }
   res.redirect('/admin');
-});
-
-
-app.post('/admin/servers/:id/resources', requireLogin, requireAdmin, async (req, res) => {
-  const db = readDb();
-  const server = db.servers.find(s => s.id === req.params.id);
-  if (!server) { req.flash('error', 'Server not found.'); return res.redirect('/admin#overview'); }
-  const node = db.nodes.find(n => n.id === server.nodeId);
-  if (!node) { req.flash('error', 'Server node not found.'); return res.redirect('/admin#overview'); }
-  const memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
-  const cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
-  const storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
-  if (memoryMb < 256 || cpuLimit <= 0 || storageLimitMb < 1024) {
-    req.flash('error', 'Invalid resource limits.');
-    return res.redirect('/admin#resources');
-  }
-  try {
-    const result = await callAgent(node, `/servers/${server.agentServerId}/resources`, { method: 'POST', body: { memoryMb, cpuLimit, storageLimitMb }, timeout: TIMEOUT * 60 });
-    server.memoryMb = memoryMb;
-    server.cpuLimit = cpuLimit;
-    server.storageLimitMb = storageLimitMb;
-    writeDb(db);
-    req.flash('success', `Resources updated for ${server.name}. Docker container was recreated safely.`);
-  } catch (e) { req.flash('error', e.message); }
-  res.redirect('/admin#resources');
 });
 
 

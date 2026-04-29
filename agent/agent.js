@@ -11,6 +11,7 @@ const { execFile } = require('child_process');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
+const AdmZip = require('adm-zip');
 
 const app = express();
 app.disable('x-powered-by');
@@ -45,18 +46,6 @@ function safePath(base, requested = '') {
   return resolved;
 }
 function relPath(base, target) { return path.relative(base, target).replace(/\\/g, '/'); }
-
-function filterConsoleLogs(logs) {
-  return String(logs || '')
-    .split(/\r?\n/)
-    .filter(line => {
-      if (!line.trim()) return true;
-      if (line.includes('ServerMain WARN Advanced terminal features are not available in this environment')) return false;
-      if (line.includes('Stopping with rcon-cli')) return false;
-      return true;
-    })
-    .join('\n');
-}
 
 function docker(args, timeout = 120000) {
   return new Promise((resolve, reject) => {
@@ -160,6 +149,21 @@ function downloadFile(url, dest) {
   });
 }
 
+
+function extractZipSafe(zipFile, destDir) {
+  const zip = new AdmZip(zipFile);
+  const root = path.resolve(destDir);
+  fs.mkdirSync(root, { recursive: true });
+  for (const entry of zip.getEntries()) {
+    const target = path.resolve(root, entry.entryName);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+      throw new Error(`Unsafe zip entry blocked: ${entry.entryName}`);
+    }
+  }
+  zip.extractAllTo(root, true);
+}
+function isZipName(name) { return /\.zip$/i.test(String(name || '')); }
+
 function defaultEnv(memoryMb, name) {
   return {
     EULA: 'TRUE',
@@ -171,26 +175,51 @@ function defaultEnv(memoryMb, name) {
     MOTD: name || 'Minecraft Server'
   };
 }
+function isProxyServer(server) {
+  const type = String((server.env && server.env.TYPE) || '').toUpperCase();
+  const image = String(server.image || '').toLowerCase();
+  const game = String(server.game || '').toLowerCase();
+  return ['VELOCITY', 'BUNGEECORD', 'WATERFALL'].includes(type) || image.includes('mc-proxy') || game.includes('velocity') || game.includes('bungeecord') || game.includes('waterfall');
+}
+function isRustServer(server) {
+  const image = String(server.image || '').toLowerCase();
+  const game = String(server.game || '').toLowerCase();
+  return game === 'rust' || game.includes('rust') || image.includes('rust');
+}
+function mainContainerPort(server) {
+  if (isProxyServer(server)) return 25577;
+  if (isRustServer(server)) return 28015;
+  return 25565;
+}
 function buildDockerArgs(server) {
   const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   env.MEMORY = env.MEMORY || `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
-  const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1)];
-  const bindings = new Set();
-  function addBinding(publicPort, containerPort, protocol) {
-    const pub = Number(publicPort);
-    const con = Number(containerPort);
-    const proto = String(protocol || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
-    if (!pub || !con || pub < 1 || pub > 65535 || con < 1 || con > 65535) return;
-    const key = `${pub}:${con}/${proto}`;
-    if (bindings.has(key)) return;
-    bindings.add(key);
-    args.push('-p', key);
+  const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1), '-v', `${server.folder}:/data`];
+
+  const usedBindings = new Set();
+  function addBinding(publicPort, containerPort, protocol = 'tcp') {
+    publicPort = Number(publicPort); containerPort = Number(containerPort); protocol = String(protocol || 'tcp').toLowerCase();
+    if (!publicPort || !containerPort) return;
+    const key = `${publicPort}:${containerPort}/${protocol}`;
+    if (usedBindings.has(key)) return;
+    usedBindings.add(key);
+    args.push('-p', `${publicPort}:${containerPort}/${protocol}`);
   }
-  addBinding(server.port || 25565, 25565, 'tcp');
-  for (const p of (server.networkPorts || [])) addBinding(p.port, p.containerPort || p.port, p.protocol || p.type || 'tcp');
-  args.push('-v', `${server.folder}:/data`);
+
+  const mainPort = mainContainerPort(server);
+  if (isRustServer(server)) {
+    addBinding(server.port || 28015, 28015, 'udp');
+    addBinding(server.port || 28015, 28015, 'tcp');
+  } else {
+    addBinding(server.port || 25565, mainPort, 'tcp');
+  }
+
+  for (const p of (server.networkPorts || [])) {
+    addBinding(p.publicPort || p.port, p.containerPort || p.port, p.protocol || p.type || 'tcp');
+  }
+
   for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${String(value)}`);
-  args.push(server.image || 'itzg/minecraft-server:java21');
+  args.push(server.image || (isRustServer(server) ? 'didstopia/rust-server:latest' : isProxyServer(server) ? 'itzg/mc-proxy' : 'itzg/minecraft-server:java21'));
   return args;
 }
 async function removeContainer(name) {
@@ -230,7 +259,7 @@ function serverSettings(server) {
   const props = readProperties(server);
   const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   return {
-    serverType: String(env.TYPE || 'PAPER').toLowerCase(),
+    type: env.TYPE || 'PAPER',
     version: env.VERSION || 'LATEST',
     motd: props.motd || env.MOTD || server.name,
     seed: props['level-seed'] || '',
@@ -260,129 +289,6 @@ app.get('/health', auth, async (req, res) => {
   res.json({ ok: true, name: AGENT_NAME, location: AGENT_LOCATION, dockerOk, dockerVersion, time: new Date().toISOString() });
 });
 
-function parsePortBindings(info) {
-  const ports = [];
-  const networkPorts = [];
-  const portMap = (info.NetworkSettings && info.NetworkSettings.Ports) || {};
-  for (const [containerKey, bindings] of Object.entries(portMap)) {
-    if (!Array.isArray(bindings) || !bindings.length) continue;
-    const [containerPortRaw, protoRaw] = containerKey.split('/');
-    const containerPort = Number(containerPortRaw);
-    const protocol = String(protoRaw || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp';
-    for (const binding of bindings) {
-      const publicPort = Number(binding.HostPort || 0);
-      if (!publicPort) continue;
-      ports.push({ publicPort, containerPort, protocol, hostIp: binding.HostIp || '' });
-      if (!(publicPort === 25565 && containerPort === 25565 && protocol === 'tcp')) {
-        networkPorts.push({ id: id(), port: publicPort, containerPort, protocol, notes: 'Imported from existing Docker container' });
-      }
-    }
-  }
-  return { ports, networkPorts };
-}
-function parseEnv(info) {
-  const env = {};
-  const list = (info.Config && info.Config.Env) || [];
-  for (const entry of list) {
-    const i = entry.indexOf('=');
-    if (i > 0) env[entry.slice(0, i)] = entry.slice(i + 1);
-  }
-  return env;
-}
-function containerSummaryFromInspect(info, importedIds = new Set()) {
-  const mounts = (info.Mounts || []).map(m => ({ source: m.Source, destination: m.Destination, type: m.Type }));
-  const dataMount = mounts.find(m => m.destination === '/data') || null;
-  const portInfo = parsePortBindings(info);
-  const env = parseEnv(info);
-  const state = info.State || {};
-  const memory = info.HostConfig && info.HostConfig.Memory ? Math.floor(Number(info.HostConfig.Memory) / 1024 / 1024) : 2048;
-  let cpuLimit = 1;
-  if (info.HostConfig && info.HostConfig.NanoCpus) cpuLimit = Number(info.HostConfig.NanoCpus) / 1e9;
-  else if (info.HostConfig && info.HostConfig.CpuQuota && info.HostConfig.CpuPeriod) cpuLimit = Number(info.HostConfig.CpuQuota) / Number(info.HostConfig.CpuPeriod);
-  const main = portInfo.ports.find(p => p.containerPort === 25565 && p.protocol === 'tcp') || portInfo.ports.find(p => p.protocol === 'tcp') || portInfo.ports[0] || null;
-  return {
-    dockerId: (info.Id || '').slice(0, 12),
-    name: String(info.Name || '').replace(/^\//, ''),
-    image: (info.Config && info.Config.Image) || '',
-    status: state.Status || 'unknown',
-    running: !!state.Running,
-    ports: portInfo.ports,
-    mainPort: main ? main.publicPort : 25565,
-    mainContainerPort: main ? main.containerPort : 25565,
-    mainProtocol: main ? main.protocol : 'tcp',
-    dataMount,
-    mounts,
-    env,
-    memoryMb: memory || 2048,
-    cpuLimit: cpuLimit || 1,
-    serverType: String(env.TYPE || 'PAPER').toLowerCase(),
-    version: env.VERSION || 'LATEST',
-    alreadyImported: importedIds.has(String(info.Name || '').replace(/^\//, ''))
-  };
-}
-
-
-app.get('/docker/containers', auth, async (req, res) => {
-  try {
-    const db = readDb();
-    const importedIds = new Set((db.servers || []).map(s => s.containerName));
-    const out = await docker(['ps', '-a', '--format', '{{.Names}}']);
-    const names = out.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    const containers = [];
-    for (const name of names) {
-      try {
-        const inspect = await docker(['inspect', name], 30000);
-        const info = JSON.parse(inspect.stdout)[0];
-        containers.push(containerSummaryFromInspect(info, importedIds));
-      } catch (e) {
-        containers.push({ name, error: e.message });
-      }
-    }
-    res.json({ containers });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/servers/import', auth, async (req, res) => {
-  const db = readDb();
-  const containerName = String(req.body.containerName || '').trim();
-  if (!containerName) return res.status(400).json({ error: 'containerName is required.' });
-  if ((db.servers || []).some(s => s.containerName === containerName)) return res.status(409).json({ error: 'That Docker container is already imported.' });
-  try {
-    const inspect = await docker(['inspect', containerName], 30000);
-    const info = JSON.parse(inspect.stdout)[0];
-    const summary = containerSummaryFromInspect(info);
-    if (!summary.dataMount || !summary.dataMount.source) return res.status(400).json({ error: 'This container has no /data volume mount, so it cannot be safely imported.' });
-    const serverId = id();
-    const name = req.body.name || summary.name || `imported-${serverId.slice(0, 8)}`;
-    const memoryMb = Number(req.body.memoryMb || summary.memoryMb || 2048);
-    const cpuLimit = Number(req.body.cpuLimit || summary.cpuLimit || 1);
-    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
-    const env = Object.assign(defaultEnv(memoryMb, name), summary.env || {}, req.body.env || {});
-    if (req.body.serverType) env.TYPE = String(req.body.serverType).toUpperCase();
-    const server = {
-      id: serverId,
-      name,
-      image: req.body.image || summary.image || 'itzg/minecraft-server:java21',
-      port: Number(req.body.port || summary.mainPort || 25565),
-      ipAddress: req.body.ipAddress || '',
-      memoryMb,
-      cpuLimit,
-      storageLimitMb,
-      containerName,
-      folder: summary.dataMount.source,
-      env,
-      networkPorts: summary.ports.filter(p => !(p.publicPort === Number(req.body.port || summary.mainPort || 25565) && p.containerPort === 25565 && p.protocol === 'tcp')).map(p => ({ id: id(), port: p.publicPort, containerPort: p.containerPort, protocol: p.protocol, notes: 'Imported from Docker' })),
-      game: req.body.game || `minecraft-${String(env.TYPE || 'paper').toLowerCase()}`,
-      importedFromDocker: true,
-      importedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString()
-    };
-    db.servers.push(server);
-    writeDb(db);
-    res.json({ ok: true, server, summary });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 app.post('/servers', auth, async (req, res) => {
   const db = readDb();
   const serverId = id();
@@ -399,7 +305,7 @@ app.post('/servers', auth, async (req, res) => {
   const containerName = `amp-${safeName(name)}-${serverId.slice(0, 8)}`;
   const env = Object.assign(defaultEnv(memoryMb, name), req.body.env || {});
 
-  const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, env, networkPorts: req.body.networkPorts || [], game: req.body.game || `minecraft-${String(env.TYPE || 'paper').toLowerCase()}`, createdAt: new Date().toISOString() };
+  const server = { id: serverId, name, image, port, ipAddress, memoryMb, cpuLimit, storageLimitMb, containerName, folder, env, networkPorts: req.body.networkPorts || [], game: req.body.game || 'minecraft-paper', createdAt: new Date().toISOString() };
 
   try {
     await docker(buildDockerArgs(server));
@@ -425,7 +331,7 @@ app.get('/servers/:id', auth, async (req, res) => {
   let logs = '';
   try {
     const out = await docker(['logs', '--tail', String(MAX_CONSOLE_LINES), server.containerName]);
-    logs = filterConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`);
+    logs = `${out.stdout || ''}${out.stderr || ''}`;
   } catch (e) { logs = e.message; }
   res.json({ server, state, stats: await serverStats(server), settings: serverSettings(server), logs });
 });
@@ -436,7 +342,7 @@ app.get('/servers/:id/logs', auth, async (req, res) => {
   const lines = Math.min(Number(req.query.lines || MAX_CONSOLE_LINES), 50000);
   try {
     const out = await docker(['logs', '--tail', String(lines), server.containerName]);
-    res.json({ logs: filterConsoleLogs(`${out.stdout || ''}${out.stderr || ''}`) });
+    res.json({ logs: `${out.stdout || ''}${out.stderr || ''}` });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -482,17 +388,27 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
   if (index === -1) return res.status(404).json({ error: 'Server not found.' });
   const server = db.servers[index];
   const currentVersion = (server.env && server.env.VERSION) || 'LATEST';
-  const currentType = String((server.env && server.env.TYPE) || 'PAPER').toUpperCase();
   const nextVersion = String(req.body.version || currentVersion).trim() || currentVersion;
-  const allowedTypes = new Set(['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA']);
-  const requestedType = String(req.body.serverType || req.body.type || currentType).toUpperCase();
-  const nextType = allowedTypes.has(requestedType) ? requestedType : currentType;
+  const currentType = String((server.env && server.env.TYPE) || 'PAPER').toUpperCase();
+  const nextType = String(req.body.serverType || req.body.type || currentType).toUpperCase();
 
   server.env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
   server.env.VERSION = nextVersion;
   server.env.TYPE = nextType;
-  server.game = `minecraft-${nextType.toLowerCase()}`;
   if (req.body.motd !== undefined) server.env.MOTD = String(req.body.motd || server.name);
+  const typeMap = {
+    PAPER: { game: 'minecraft-paper', image: 'itzg/minecraft-server:java21' },
+    PURPUR: { game: 'minecraft-purpur', image: 'itzg/minecraft-server:java21' },
+    FABRIC: { game: 'minecraft-fabric', image: 'itzg/minecraft-server:java21' },
+    FORGE: { game: 'minecraft-forge', image: 'itzg/minecraft-server:java21' },
+    NEOFORGE: { game: 'minecraft-neoforge', image: 'itzg/minecraft-server:java21' },
+    VANILLA: { game: 'minecraft-vanilla', image: 'itzg/minecraft-server:java21' },
+    VELOCITY: { game: 'minecraft-velocity', image: 'itzg/mc-proxy' },
+    BUNGEECORD: { game: 'minecraft-bungeecord', image: 'itzg/mc-proxy' },
+    WATERFALL: { game: 'minecraft-waterfall', image: 'itzg/mc-proxy' },
+    RUST: { game: 'rust', image: 'didstopia/rust-server:latest' }
+  };
+  if (typeMap[nextType]) { server.game = typeMap[nextType].game; server.image = typeMap[nextType].image; }
   writeProperties(server, {
     motd: req.body.motd,
     'level-seed': req.body.seed,
@@ -511,59 +427,8 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
   writeDb(db);
 
   try {
-    const needsRecreate = nextVersion !== currentVersion || nextType !== currentType;
-    if (needsRecreate) await recreateContainer(server);
-    res.json({ ok: true, settings: serverSettings(server), recreated: needsRecreate, server });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-
-app.post('/servers/:id/resources', auth, async (req, res) => {
-  const db = readDb();
-  const index = db.servers.findIndex(s => s.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
-  const server = db.servers[index];
-  server.memoryMb = Number(req.body.memoryMb || server.memoryMb || 2048);
-  server.cpuLimit = Number(req.body.cpuLimit || server.cpuLimit || 1);
-  server.storageLimitMb = Number(req.body.storageLimitMb || server.storageLimitMb || 10240);
-  server.env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
-  server.env.MEMORY = `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
-  db.servers[index] = server;
-  writeDb(db);
-  try { await recreateContainer(server); res.json({ ok: true, server, recreated: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/servers/:id/network/ports', auth, async (req, res) => {
-  const db = readDb();
-  const index = db.servers.findIndex(s => s.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
-  const server = db.servers[index];
-  server.networkPorts = (req.body.networkPorts || []).map(p => ({
-    id: p.id || id(),
-    port: Number(p.port),
-    containerPort: Number(p.containerPort || p.port),
-    protocol: String(p.protocol || p.type || 'tcp').toLowerCase() === 'udp' ? 'udp' : 'tcp',
-    notes: p.notes || ''
-  })).filter(p => p.port && p.containerPort && p.port >= 1 && p.port <= 65535 && p.containerPort >= 1 && p.containerPort <= 65535);
-  db.servers[index] = server;
-  writeDb(db);
-  try { await recreateContainer(server); res.json({ ok: true, server, recreated: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/servers/:id', auth, async (req, res) => {
-  const db = readDb();
-  const index = db.servers.findIndex(s => s.id === req.params.id);
-  if (index === -1) return res.status(404).json({ error: 'Server not found.' });
-  const server = db.servers[index];
-  try {
-    await removeContainer(server.containerName);
-    fs.rmSync(server.folder, { recursive: true, force: true });
-    fs.rmSync(serverBackupDir(server), { recursive: true, force: true });
-    db.servers.splice(index, 1);
-    writeDb(db);
-    res.json({ ok: true, deleted: server.id });
+    if (nextVersion !== currentVersion || nextType !== currentType) await recreateContainer(server);
+    res.json({ ok: true, settings: serverSettings(server), recreated: nextVersion !== currentVersion || nextType !== currentType });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -582,27 +447,58 @@ app.get('/servers/:id/files', auth, (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.get('/servers/:id/files/download', auth, (req, res) => {
+app.get('/servers/:id/files/download', auth, async (req, res) => {
   const server = getServer(req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found.' });
   try {
     const file = safePath(server.folder, req.query.path || '');
-    if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) return res.status(400).json({ error: 'File not found.' });
+    if (!fs.existsSync(file)) return res.status(400).json({ error: 'File not found.' });
+    const stat = fs.statSync(file);
+    if (stat.isDirectory()) {
+      const baseName = path.basename(file) || 'server-files';
+      const tmp = path.join(TMP_DIR, `${safeName(baseName)}-${Date.now()}.tar.gz`);
+      await run('tar', ['-czf', tmp, '-C', file, '.'], 300000);
+      return res.download(tmp, `${baseName}.tar.gz`, () => fs.rmSync(tmp, { force: true }));
+    }
     res.download(file);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.post('/servers/:id/files/upload', auth, upload.single('file'), async (req, res) => {
+app.post('/servers/:id/files/upload', auth, upload.array('files', 50), async (req, res) => {
+  const server = getServer(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  const uploaded = req.files || [];
+  try {
+    const total = uploaded.reduce((sum, f) => sum + (f.size || 0), 0);
+    await ensureStorageAvailable(server, total);
+    const dir = safePath(server.folder, req.body.path || '');
+    fs.mkdirSync(dir, { recursive: true });
+    const results = [];
+    for (const file of uploaded) {
+      const dest = safePath(dir, file.originalname);
+      fs.renameSync(file.path, dest);
+      if (String(req.body.extractZip || '').toLowerCase() === 'true' && isZipName(file.originalname)) {
+        extractZipSafe(dest, dir);
+        if (String(req.body.deleteZipAfterExtract || '').toLowerCase() === 'true') fs.rmSync(dest, { force: true });
+        results.push({ path: relPath(server.folder, dest), extracted: true });
+      } else {
+        results.push({ path: relPath(server.folder, dest), extracted: false });
+      }
+    }
+    res.json({ ok: true, files: results });
+  } catch (e) { for (const file of uploaded) fs.rmSync(file.path, { force: true }); res.status(400).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/files/unzip', auth, async (req, res) => {
   const server = getServer(req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found.' });
   try {
-    await ensureStorageAvailable(server, req.file ? req.file.size : 0);
-    const dir = safePath(server.folder, req.body.path || '');
-    fs.mkdirSync(dir, { recursive: true });
-    const dest = safePath(dir, req.file.originalname);
-    fs.renameSync(req.file.path, dest);
-    res.json({ ok: true, path: relPath(server.folder, dest) });
-  } catch (e) { if (req.file) fs.rmSync(req.file.path, { force: true }); res.status(400).json({ error: e.message }); }
+    const zipFile = safePath(server.folder, req.body.path || '');
+    if (!fs.existsSync(zipFile) || !isZipName(zipFile)) return res.status(400).json({ error: 'Pick a .zip file to unzip.' });
+    const destDir = safePath(server.folder, req.body.destination || path.dirname(req.body.path || ''));
+    extractZipSafe(zipFile, destDir);
+    res.json({ ok: true, extractedTo: relPath(server.folder, destDir) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.post('/servers/:id/files/mkdir', auth, (req, res) => {
@@ -700,25 +596,6 @@ app.post('/servers/:id/saves/upload', auth, upload.single('save'), async (req, r
     fs.rmSync(req.file.path, { force: true });
     fs.rmSync(work, { recursive: true, force: true });
   }
-});
-
-
-app.get('/servers/:id/saves/download', auth, async (req, res) => {
-  const server = getServer(req.params.id);
-  if (!server) return res.status(404).json({ error: 'Server not found.' });
-  const worldName = safeName(req.query.worldName || 'world') || 'world';
-  try {
-    const worldDir = safePath(server.folder, worldName);
-    if (!fs.existsSync(worldDir) || !fs.statSync(worldDir).isDirectory()) {
-      return res.status(404).json({ error: `World folder '${worldName}' was not found.` });
-    }
-    const outFile = path.join(TMP_DIR, `${safeName(server.name)}-${worldName}-${Date.now()}.tar.gz`);
-    await run('tar', ['-czf', outFile, '-C', server.folder, worldName], 300000);
-    res.download(outFile, `${worldName}.tar.gz`, err => {
-      fs.rmSync(outFile, { force: true });
-      if (err && !res.headersSent) res.status(500).json({ error: err.message });
-    });
-  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/servers/:id/installer', auth, async (req, res) => {
