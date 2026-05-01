@@ -25,6 +25,8 @@ const BACKUPS_DIR = process.env.BACKUPS_DIR || '/opt/custom-amp/backups';
 const TMP_DIR = process.env.TMP_DIR || '/opt/custom-amp/tmp';
 const DB_FILE = path.join(SERVERS_DIR, 'agent-db.json');
 const MAX_CONSOLE_LINES = Number(process.env.MAX_CONSOLE_LINES || 5000);
+const SFTP_PORT = Number(process.env.SFTP_PORT || process.env.FTP_PORT || 2222);
+const SFTP_CONTAINER_NAME = process.env.SFTP_CONTAINER_NAME || 'custom-amp-sftp';
 
 for (const dir of [SERVERS_DIR, BACKUPS_DIR, TMP_DIR]) fs.mkdirSync(dir, { recursive: true });
 if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ servers: [] }, null, 2));
@@ -32,7 +34,7 @@ if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ servers:
 const upload = multer({ dest: TMP_DIR, limits: { fileSize: 1024 * 1024 * 1024 * 5 } });
 const agentLimiter = rateLimit({ windowMs: 60 * 1000, limit: 240, standardHeaders: true, legacyHeaders: false });
 
-function readDb() { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
+function readDb() { const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); db.ftpUsers = db.ftpUsers || []; return db; }
 function writeDb(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 function safeName(name) { return String(name || 'server').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 40); }
 function id() { return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'); }
@@ -184,6 +186,29 @@ function defaultEnv(memoryMb, name) {
     MOTD: name || 'Minecraft Server'
   };
 }
+function normalizeServerEnv(server) {
+  const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  const type = String(env.TYPE || '').toUpperCase();
+  if (['VELOCITY', 'BUNGEECORD', 'WATERFALL'].includes(type)) {
+    // itzg/mc-proxy stores proxy files in /server internally. We bind the same host folder to /data and /server.
+    delete env.EULA;
+    delete env.ENABLE_RCON;
+    delete env.RCON_PASSWORD;
+    delete env.MOTD;
+  }
+  if (type === 'CUSTOM') {
+    env.CUSTOM_SERVER = env.CUSTOM_SERVER || '/data/server.jar';
+    env.TYPE = 'CUSTOM';
+  }
+  if (isRustServer(server)) {
+    // Common Rust image vars; users can edit/add more in future.
+    delete env.EULA;
+    delete env.ENABLE_RCON;
+    delete env.RCON_PASSWORD;
+    env.RUST_SERVER_NAME = env.RUST_SERVER_NAME || server.name || 'Rust Server';
+  }
+  return env;
+}
 function isProxyServer(server) {
   const type = String((server.env && server.env.TYPE) || '').toUpperCase();
   const image = String(server.image || '').toLowerCase();
@@ -201,9 +226,11 @@ function mainContainerPort(server) {
   return 25565;
 }
 function buildDockerArgs(server) {
-  const env = Object.assign(defaultEnv(server.memoryMb, server.name), server.env || {});
+  const env = normalizeServerEnv(server);
   env.MEMORY = env.MEMORY || `${Math.floor(Number(server.memoryMb || 2048) * 0.85)}M`;
   const args = ['run', '-d', '--name', server.containerName, '--restart', 'unless-stopped', '-m', `${server.memoryMb}m`, '--cpus', String(server.cpuLimit || 1), '-v', `${server.folder}:/data`];
+  if (isProxyServer(server)) args.push('-v', `${server.folder}:/server`);
+  if (isRustServer(server)) args.push('-v', `${server.folder}:/steamcmd/rust`);
 
   const usedBindings = new Set();
   function addBinding(publicPort, containerPort, protocol = 'tcp') {
@@ -405,6 +432,7 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
   server.env.VERSION = nextVersion;
   server.env.TYPE = nextType;
   if (req.body.motd !== undefined) server.env.MOTD = String(req.body.motd || server.name);
+  if (req.body.customServerJar !== undefined && String(req.body.customServerJar || '').trim()) server.env.CUSTOM_SERVER = String(req.body.customServerJar).trim().startsWith('/') ? String(req.body.customServerJar).trim() : `/data/${String(req.body.customServerJar).trim()}`;
   const typeMap = {
     PAPER: { game: 'minecraft-paper', image: 'itzg/minecraft-server:java21' },
     PURPUR: { game: 'minecraft-purpur', image: 'itzg/minecraft-server:java21' },
@@ -415,7 +443,9 @@ app.post('/servers/:id/settings', auth, async (req, res) => {
     VELOCITY: { game: 'minecraft-velocity', image: 'itzg/mc-proxy' },
     BUNGEECORD: { game: 'minecraft-bungeecord', image: 'itzg/mc-proxy' },
     WATERFALL: { game: 'minecraft-waterfall', image: 'itzg/mc-proxy' },
-    RUST: { game: 'rust', image: 'didstopia/rust-server:latest' }
+    RUST: { game: 'rust', image: 'didstopia/rust-server:latest' },
+    CUSTOM: { game: 'minecraft-custom-jar', image: 'itzg/minecraft-server:java21' },
+    CUSTOM: { game: 'minecraft-custom-jar', image: 'itzg/minecraft-server:java21' }
   };
   if (typeMap[nextType]) { server.game = typeMap[nextType].game; server.image = typeMap[nextType].image; }
   writeProperties(server, {
@@ -788,6 +818,80 @@ app.post('/servers/:id/delete', auth, async (req, res) => {
   db.servers.splice(index, 1);
   writeDb(db);
   res.json({ ok: true, deleted: server.id });
+});
+
+
+function makeFtpUsername(server) {
+  return `srv_${safeName(server.name).replace(/-/g, '_')}_${String(server.id).slice(0, 8)}`.slice(0, 32);
+}
+function makeFtpPassword() {
+  return crypto.randomBytes(12).toString('hex');
+}
+async function recreateSftpContainer() {
+  const db = readDb();
+  const ftpUsers = db.ftpUsers || [];
+  try { await docker(['rm', '-f', SFTP_CONTAINER_NAME], 60000); } catch {}
+  if (!ftpUsers.length) return { ok: true, running: false, users: 0 };
+  const args = ['run', '-d', '--name', SFTP_CONTAINER_NAME, '--restart', 'unless-stopped', '-p', `${SFTP_PORT}:22/tcp`];
+  const commandUsers = [];
+  for (const user of ftpUsers) {
+    const server = db.servers.find(s => s.id === user.serverId);
+    if (!server || !server.folder || !fs.existsSync(server.folder)) continue;
+    args.push('-v', `${server.folder}:/home/${user.username}/server`);
+    // atmoz/sftp format: user:pass:uid:gid:dirs
+    commandUsers.push(`${user.username}:${user.password}:1000:1000:server`);
+  }
+  if (!commandUsers.length) return { ok: true, running: false, users: 0 };
+  args.push('atmoz/sftp:latest', ...commandUsers);
+  await docker(args, 120000);
+  return { ok: true, running: true, users: commandUsers.length, port: SFTP_PORT };
+}
+
+app.get('/servers/:id/ftp', auth, async (req, res) => {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  const user = (db.ftpUsers || []).find(u => u.serverId === server.id);
+  res.json({
+    enabled: !!user,
+    host: req.hostname,
+    port: SFTP_PORT,
+    protocol: 'SFTP',
+    username: user ? user.username : '',
+    password: user ? user.password : '',
+    note: 'Use SFTP, not plain FTP. The user is restricted to this server folder.'
+  });
+});
+
+app.post('/servers/:id/ftp/reset', auth, async (req, res) => {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  db.ftpUsers = db.ftpUsers || [];
+  db.ftpUsers = db.ftpUsers.filter(u => u.serverId !== server.id);
+  const ftpUser = {
+    id: id(),
+    serverId: server.id,
+    username: makeFtpUsername(server),
+    password: makeFtpPassword(),
+    createdAt: new Date().toISOString()
+  };
+  db.ftpUsers.push(ftpUser);
+  writeDb(db);
+  try {
+    const status = await recreateSftpContainer();
+    res.json({ ok: true, ftp: { enabled: true, protocol: 'SFTP', port: SFTP_PORT, username: ftpUser.username, password: ftpUser.password }, status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/servers/:id/ftp/disable', auth, async (req, res) => {
+  const db = readDb();
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  db.ftpUsers = (db.ftpUsers || []).filter(u => u.serverId !== server.id);
+  writeDb(db);
+  try { await recreateSftpContainer(); res.json({ ok: true, enabled: false }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.listen(PORT, () => console.log(`${AGENT_NAME} agent running on port ${PORT}`));

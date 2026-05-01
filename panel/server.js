@@ -177,7 +177,8 @@ function gameTypeConfig(type) {
     VELOCITY: { game: 'minecraft-velocity', image: 'itzg/mc-proxy', envType: 'VELOCITY', defaultPort: 25577 },
     BUNGEECORD: { game: 'minecraft-bungeecord', image: 'itzg/mc-proxy', envType: 'BUNGEECORD', defaultPort: 25577 },
     WATERFALL: { game: 'minecraft-waterfall', image: 'itzg/mc-proxy', envType: 'WATERFALL', defaultPort: 25577 },
-    RUST: { game: 'rust', image: 'didstopia/rust-server:latest', envType: 'RUST', defaultPort: 28015 }
+    RUST: { game: 'rust', image: 'didstopia/rust-server:latest', envType: 'RUST', defaultPort: 28015 },
+    CUSTOM: { game: 'minecraft-custom-jar', image: 'itzg/minecraft-server:java21', envType: 'CUSTOM', defaultPort: 25565 }
   };
   return map[key] || map.PAPER;
 }
@@ -316,14 +317,15 @@ app.get('/api-keys', requireLogin, (req, res) => {
 app.get('/servers/:id', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
   const filePath = req.query.path || '';
-  let live = null, files = null, backups = null, plugins = null, mods = null, settings = null;
+  let live = null, files = null, backups = null, plugins = null, mods = null, settings = null, ftp = null;
   try { live = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}`); } catch (e) { live = { error: e.message }; }
   try { files = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files?path=${encodeURIComponent(filePath)}`); } catch (e) { files = { error: e.message, items: [], path: filePath, parent: '' }; }
   try { backups = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/backups`); } catch (e) { backups = { error: e.message, backups: [] }; }
   try { plugins = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files?path=plugins`); } catch (e) { plugins = { error: e.message, items: [] }; }
   try { mods = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/files?path=mods`); } catch (e) { mods = { error: e.message, items: [] }; }
   try { settings = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`); } catch (e) { settings = { error: e.message, settings: {} }; }
-  res.render('server', { title: ctx.server.name, server: ctx.server, node: ctx.node, live, files, backups, plugins, mods, settings, filePath, pluginCatalog: PLUGIN_CATALOG, allUsers: ctx.db.users });
+  try { ftp = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/ftp`); } catch (e) { ftp = { error: e.message, enabled: false }; }
+  res.render('server', { title: ctx.server.name, server: ctx.server, node: ctx.node, live, files, backups, plugins, mods, settings, filePath, pluginCatalog: PLUGIN_CATALOG, allUsers: ctx.db.users, ftp });
 });
 
 app.post('/servers/:id/action', requireLogin, async (req, res) => {
@@ -489,7 +491,8 @@ app.post('/servers/:id/settings', requireLogin, async (req, res) => {
       allowFlight: req.body.allowFlight === 'true',
       spawnProtection: req.body.spawnProtection,
       viewDistance: req.body.viewDistance,
-      simulationDistance: req.body.simulationDistance
+      simulationDistance: req.body.simulationDistance,
+      customServerJar: req.body.customServerJar
     };
     await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/settings`, { method: 'POST', body: payload, timeout: TIMEOUT * 30 });
     req.flash('success', 'Server settings updated. Version changes recreate the container.');
@@ -707,7 +710,7 @@ async function cloudflareApi(method, endpoint, body) {
   }
   return data.result;
 }
-async function createCloudflareRecords({ hostname, target, port }) {
+async function createCloudflareRecords({ hostname, target, port, serviceType }) {
   if (!cloudflareEnabled()) return { status: 'manual-dns-required', cloudflareEnabled: false };
   const dnsType = isIpAddress(target) ? 'A' : 'CNAME';
   const main = await cloudflareApi('POST', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records`, {
@@ -718,23 +721,17 @@ async function createCloudflareRecords({ hostname, target, port }) {
     proxied: CLOUDFLARE_PROXIED
   });
   let srv = null;
-  if (Number(port) && Number(port) !== 25565) {
-    srv = await cloudflareApi('POST', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records`, {
-      type: 'SRV',
-      name: `_minecraft._tcp.${hostname}`,
-      data: {
-        service: '_minecraft',
-        proto: '_tcp',
-        name: hostname,
-        priority: 0,
-        weight: 5,
-        port: Number(port),
-        target: hostname
-      },
-      ttl: 1,
-      proxied: false
-    });
-  }
+  const svc = String(serviceType || 'java').toLowerCase();
+  const makeSrv = async (service, proto, defaultPort) => cloudflareApi('POST', `/zones/${CLOUDFLARE_ZONE_ID}/dns_records`, {
+    type: 'SRV',
+    name: `${service}.${proto}.${hostname}`,
+    data: { service, proto, name: hostname, priority: 0, weight: 5, port: Number(port), target: hostname },
+    ttl: 1,
+    proxied: false
+  });
+  if (svc === 'java' && Number(port) && Number(port) !== 25565) srv = await makeSrv('_minecraft', '_tcp', 25565);
+  if (svc === 'bedrock' && Number(port) && Number(port) !== 19132) srv = await makeSrv('_minecraft', '_udp', 19132);
+  // Rust generally uses A/CNAME plus visible port; no widely supported SRV fallback is created here.
   return { status: 'cloudflare-created', cloudflareEnabled: true, cloudflareRecordId: main.id, cloudflareSrvRecordId: srv ? srv.id : null, dnsType };
 }
 async function deleteCloudflareRecord(recordId) {
@@ -759,7 +756,8 @@ app.post('/servers/:id/subdomains', requireLogin, async (req, res) => {
     const takenBy = ctx.db.servers.find(s => (s.subdomains || []).some(d => d.hostname === hostname));
     if (takenBy) throw new Error('That subdomain is taken by another server.');
 
-    const cloudflare = await createCloudflareRecords({ hostname, target, port });
+    const serviceType = String(req.body.serviceType || (String(ctx.server.game || '').includes('rust') ? 'rust' : String(ctx.server.game || '').includes('bedrock') ? 'bedrock' : 'java')).toLowerCase();
+    const cloudflare = await createCloudflareRecords({ hostname, target, port, serviceType });
     ctx.server.subdomains.push({
       id: uuidv4(),
       hostname,
@@ -767,6 +765,7 @@ app.post('/servers/:id/subdomains', requireLogin, async (req, res) => {
       port,
       status: cloudflare.status,
       dnsType: cloudflare.dnsType || (isIpAddress(target) ? 'A' : 'CNAME'),
+      serviceType,
       cloudflareRecordId: cloudflare.cloudflareRecordId || null,
       cloudflareSrvRecordId: cloudflare.cloudflareSrvRecordId || null,
       createdAt: new Date().toISOString()
@@ -834,7 +833,7 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
     const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const name = req.body.serverName || `${user.name || 'server'}-${Date.now()}`;
-    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').game, image: req.body.image || gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').image, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').envType, VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name } }, timeout: TIMEOUT * 60 });
+    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').game, image: req.body.image || gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').image, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').envType, VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name, CUSTOM_SERVER: req.body.customServerJar ? (String(req.body.customServerJar).startsWith('/') ? req.body.customServerJar : `/data/${req.body.customServerJar}`) : undefined } }, timeout: TIMEOUT * 60 });
     const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || 'minecraft-paper', ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
     db.servers.push(panelServer);
     writeDb(db);
@@ -924,6 +923,23 @@ app.post('/admin/servers/:id/resources', requireLogin, requireAdmin, async (req,
   res.redirect('/admin#resources');
 });
 
+
+app.post('/servers/:id/ftp/reset', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try {
+    const data = await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/ftp/reset`, { method: 'POST', timeout: TIMEOUT * 30 });
+    req.flash('success', `SFTP user created. Username: ${data.ftp.username} Password: ${data.ftp.password}`);
+  } catch (e) { req.flash('error', e.message); }
+  res.redirect(`/servers/${ctx.server.id}#ftp`);
+});
+
+app.post('/servers/:id/ftp/disable', requireLogin, async (req, res) => {
+  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
+  try { await callAgent(ctx.node, `/servers/${ctx.server.agentServerId}/ftp/disable`, { method: 'POST', timeout: TIMEOUT * 30 }); req.flash('success', 'SFTP access disabled.'); }
+  catch (e) { req.flash('error', e.message); }
+  res.redirect(`/servers/${ctx.server.id}#ftp`);
+});
+
 app.get('/admin', requireLogin, requireAdmin, (req, res) => { const db = readDb(); res.render('admin', { title: 'Admin', db }); });
 app.post('/admin/nodes', requireLogin, requireAdmin, (req, res) => {
   const db = readDb();
@@ -988,7 +1004,8 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
         MEMORY: `${Math.floor(memoryMb * 0.85)}M`,
         ENABLE_RCON: 'true',
         RCON_PASSWORD: 'minecraft',
-        MOTD: req.body.name || 'Minecraft Server'
+        MOTD: req.body.name || 'Minecraft Server',
+        CUSTOM_SERVER: req.body.customServerJar ? (String(req.body.customServerJar).startsWith('/') ? req.body.customServerJar : `/data/${req.body.customServerJar}`) : undefined
       }
     }});
     db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: req.body.name, game, ownerId: owner.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });

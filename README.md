@@ -309,3 +309,28 @@ Security notes:
 - The token is stored only in `panel/.env` and is never displayed in the panel UI.
 
 The panel allows one subdomain per server and checks all existing server records before saving. If a hostname is already used, it will reject it as taken.
+
+## v14 notes
+
+### File manager repair
+The file manager supports multi-file upload, ZIP extraction, existing ZIP unzip buttons, and folder downloads as `.tar.gz`.
+
+### SFTP access
+The panel can create one SFTP login per server. All users share the same SFTP port, but each username is mounted to only that server's folder.
+
+Default SFTP port: `2222/tcp`.
+
+Open it on the node:
+
+```bash
+sudo ufw allow 2222/tcp
+```
+
+Optional agent `.env`:
+
+```env
+SFTP_PORT=2222
+SFTP_CONTAINER_NAME=custom-amp-sftp
+```
+
+The agent uses the Docker image `atmoz/sftp:latest` and recreates one shared SFTP container when server SFTP users are created/reset/disabled.

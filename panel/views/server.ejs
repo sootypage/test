@@ -38,6 +38,7 @@
 <section class="tab-bar card">
   <button class="tab-btn active" data-tab="console">Console</button>
   <button class="tab-btn" data-tab="files">File manager</button>
+  <button class="tab-btn" data-tab="ftp">FTP / SFTP</button>
   <button class="tab-btn" data-tab="saves">Saves</button>
   <button class="tab-btn" data-tab="backups">Backups</button>
   <button class="tab-btn" data-tab="addons">Plugins / Mods</button>
@@ -141,11 +142,46 @@
             </td>
           </tr>
         <% }) %>
+        <% if (!(files && files.items && files.items.length)) { %>
+          <tr><td colspan="5" class="muted">No files found. If this used to show files, restart the agent or check the server folder path in the agent database.</td></tr>
+        <% } %>
       </tbody>
     </table>
   </div>
 </section>
 
+<section id="tab-ftp" class="tab-panel">
+  <div class="card">
+    <h2>FTP / SFTP access</h2>
+    <p class="muted">This uses one shared SFTP port for all users. Each server gets its own username and password and is restricted to that server folder.</p>
+    <% if (ftp && ftp.error) { %><p class="error"><%= ftp.error %></p><% } %>
+    <div class="resource-grid">
+      <div><strong><%= ftp && ftp.enabled ? 'Enabled' : 'Disabled' %></strong><span>Status</span></div>
+      <div><strong><%= ftp && ftp.port ? ftp.port : '2222' %></strong><span>SFTP port</span></div>
+      <div><strong><%= server.ipAddress || node.publicIp || 'Node IP' %></strong><span>Host</span></div>
+      <div><strong><%= ftp && ftp.username ? ftp.username : 'Not created' %></strong><span>Username</span></div>
+    </div>
+    <% if (ftp && ftp.enabled) { %>
+      <div class="card inner-card">
+        <p><strong>Host:</strong> <code><%= server.ipAddress || node.publicIp || 'YOUR_NODE_IP' %></code></p>
+        <p><strong>Port:</strong> <code><%= ftp.port %></code></p>
+        <p><strong>Protocol:</strong> <code>SFTP</code></p>
+        <p><strong>Username:</strong> <code><%= ftp.username %></code></p>
+        <p><strong>Password:</strong> <code><%= ftp.password %></code></p>
+        <p class="muted small">Use FileZilla, WinSCP, or another SFTP client. Use SFTP, not normal FTP.</p>
+      </div>
+    <% } %>
+    <div class="button-row">
+      <form method="post" action="/servers/<%= server.id %>/ftp/reset" onsubmit="return confirm('Create/reset SFTP password for this server?')">
+        <button class="primary">Create / reset SFTP login</button>
+      </form>
+      <form method="post" action="/servers/<%= server.id %>/ftp/disable" onsubmit="return confirm('Disable SFTP access for this server?')">
+        <button class="danger">Disable SFTP</button>
+      </form>
+    </div>
+    <p class="muted small">Open the shared SFTP port on the node firewall: <code>sudo ufw allow 2222/tcp</code>. You can change it in agent/.env with <code>SFTP_PORT=2222</code>.</p>
+  </div>
+</section>
 
 <section id="tab-saves" class="tab-panel">
   <div class="card">
@@ -339,7 +375,7 @@
     <form method="post" action="/servers/<%= server.id %>/settings" class="form settings-grid">
       <label>Server type</label>
       <select name="serverType">
-        <% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','VELOCITY','BUNGEECORD','WATERFALL','RUST'].forEach(v => { %>
+        <% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','VELOCITY','BUNGEECORD','WATERFALL','RUST','CUSTOM'].forEach(v => { %>
           <option value="<%= v %>" <%= String(s.type || 'PAPER').toUpperCase() === v ? 'selected' : '' %>><%= v %></option>
         <% }) %>
       </select>
@@ -349,6 +385,10 @@
 
       <label>MOTD</label>
       <input name="motd" value="<%= s.motd || server.name %>" placeholder="A Minecraft Server">
+
+      <label>Custom JAR file</label>
+      <input name="customServerJar" value="<%= (settings && settings.server && settings.server.env && settings.server.env.CUSTOM_SERVER) ? settings.server.env.CUSTOM_SERVER : '' %>" placeholder="server.jar or /data/server.jar">
+      <p class="muted small span">For Custom JAR, upload your jar to the File Manager first. Default path is /data/server.jar.</p>
 
       <label>World seed</label>
       <input name="seed" value="<%= s.seed || '' %>" placeholder="Leave blank for random">
@@ -480,6 +520,7 @@
       <label>Domain / subdomain</label><input name="hostname" placeholder="play.example.com" required>
       <label>Target</label><input name="target" value="<%= server.ipAddress || '' %>" placeholder="Server IP or CNAME target">
       <label>Port</label><input name="port" type="number" value="<%= server.port %>">
+      <label>Game DNS type</label><select name="serviceType"><option value="java">Minecraft Java / Velocity / BungeeCord / Waterfall</option><option value="bedrock">Minecraft Bedrock / Geyser UDP</option><option value="rust">Rust</option><option value="other">Other</option></select>
       <div class="span"><button class="primary">Add subdomain</button></div>
     </form>
     <table>

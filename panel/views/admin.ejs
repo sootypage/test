@@ -97,6 +97,7 @@
         <option value="BUNGEECORD">BungeeCord</option>
         <option value="WATERFALL">Waterfall</option>
         <option value="RUST">Rust</option>
+        <option value="CUSTOM">Custom JAR</option>
       </select>
       <label>Game key</label><input name="game" placeholder="Leave blank to auto set from type">
       <label>Docker image</label><input name="image" placeholder="Leave blank to auto set from type">
@@ -143,7 +144,7 @@
       <label>Owner</label><select name="ownerId"><% db.users.forEach(u => { %><option value="<%= u.id %>"><%= u.email %></option><% }) %></select>
       <label>Container name or ID</label><input name="container" required placeholder="amp-warsmp-xxxx or c85336af2695">
       <label>Panel server name</label><input name="name" required placeholder="warsmp">
-      <label>Server type</label><select name="serverType"><% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','VELOCITY','BUNGEECORD','WATERFALL','RUST'].forEach(t => { %><option value="<%= t %>"><%= t %></option><% }) %></select>
+      <label>Server type</label><select name="serverType"><% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','VELOCITY','BUNGEECORD','WATERFALL','RUST','CUSTOM'].forEach(t => { %><option value="<%= t %>"><%= t %></option><% }) %></select>
       <label>Public IP</label><input name="ipAddress" placeholder="Leave blank to use node public IP">
       <label>Main public port</label><input name="port" type="number" placeholder="25565 / 25566 / 28015">
       <label>RAM MB</label><input name="memoryMb" type="number" value="2048">
