@@ -72,7 +72,7 @@ fi
 info "Installing system packages..."
 sudo apt update
 PACKAGES=(curl ca-certificates gnupg build-essential rsync unzip tar)
-if [[ "$INSTALL_PANEL" == true ]]; then PACKAGES+=(nodejs); fi
+if [[ "$INSTALL_PANEL" == true ]]; then PACKAGES+=(nodejs postgresql postgresql-client); fi
 if [[ "$INSTALL_AGENT" == true ]]; then PACKAGES+=(nodejs docker.io); fi
 if [[ "$SETUP_NGINX" == true ]]; then PACKAGES+=(nginx certbot python3-certbot-nginx); fi
 sudo apt install -y "${PACKAGES[@]}"
@@ -117,6 +117,18 @@ if [[ "$INSTALL_PANEL" == true ]]; then
   write_env_value .env DATA_DIR "./data"
   write_env_value .env PANEL_TO_AGENT_TOKEN "$SHARED_TOKEN"
   write_env_value .env NODE_API_TIMEOUT_MS "10000"
+
+  info "Setting up PostgreSQL database for panel state mirror..."
+  DB_NAME="custom_amp_panel"
+  DB_USER="custom_amp"
+  DB_PASS="$(get_env_value .env POSTGRES_PASSWORD || random_secret)"
+  sudo systemctl enable --now postgresql || true
+  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
+  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+  sudo -u postgres psql -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS panel_state (id text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());" >/dev/null
+  write_env_value .env DATABASE_URL "postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}"
+  write_env_value .env POSTGRES_MIRROR "true"
+  write_env_value .env POSTGRES_PASSWORD "$DB_PASS"
   cd ..
   sudo cp docs/systemd-panel.service /etc/systemd/system/custom-amp-panel.service
   sudo systemctl daemon-reload

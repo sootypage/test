@@ -334,3 +334,56 @@ SFTP_CONTAINER_NAME=custom-amp-sftp
 ```
 
 The agent uses the Docker image `atmoz/sftp:latest` and recreates one shared SFTP container when server SFTP users are created/reset/disabled.
+
+## New features in this build
+
+### Split Minecraft servers
+Server owners can use the **Split server** tab on a Minecraft server to create a new Minecraft server using part of the main server's RAM, CPU, and storage. The split server and the remaining main server must both keep at least 1024MB RAM.
+
+### Website API provisioning
+Create an API key in **API Keys** with these permissions:
+
+- Website: create users
+- Website: create servers
+- Website: use plan limits
+
+Then your website can call:
+
+```bash
+curl -X POST "$PANEL_URL/api/v1/provision/order" \
+  -H "Authorization: Bearer cap_xxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":"customer@example.com",
+    "password":"optional-password",
+    "serverName":"customer-server",
+    "gameType":"PAPER",
+    "gameVersion":"1.21.11",
+    "memoryMb":2048,
+    "cpuLimit":1,
+    "storageLimitMb":10240,
+    "port":25571,
+    "planId":"optional-plan-id",
+    "orderId":"stripe-session-or-order-id"
+  }'
+```
+
+The API creates the user if needed, creates the server on the first available node, and stores the API key and order/server information in panel data. The installer also sets up a local PostgreSQL database and mirrors panel state into it when `DATABASE_URL` is set.
+
+### PostgreSQL panel database mirror
+When installing **Panel only** or **Both**, `install-ubuntu.sh` installs PostgreSQL and creates:
+
+- database: `custom_amp_panel`
+- user: `custom_amp`
+- table: `panel_state`
+
+The panel still keeps a local JSON file for compatibility and mirrors each write into PostgreSQL. This makes future migration to full PostgreSQL tables easier while keeping old installs safe.
+
+### delete.sh
+Run this to uninstall services and optionally remove files:
+
+```bash
+sudo ./delete.sh
+```
+
+It asks before deleting Docker containers, server files, backups, and PostgreSQL data.
