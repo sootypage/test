@@ -9,13 +9,13 @@ const bcrypt = require('bcryptjs');
 const fetch = require('node-fetch');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
 const FormData = require('form-data');
 const { URL } = require('url');
+const { execFileSync } = require('child_process');
 
 const app = express();
 app.disable('x-powered-by');
@@ -43,9 +43,7 @@ const API_PERMISSIONS = [
   { key: 'console:command', label: 'Send server commands' },
   { key: 'servers:list', label: 'List servers for bots' },
   { key: 'provision:user', label: 'Website: create users' },
-  { key: 'provision:server', label: 'Website: create servers' },
-  { key: 'provision:plans', label: 'Website: use plan limits' },
-  { key: 'server:split', label: 'Split Minecraft servers' }
+  { key: 'provision:server', label: 'Website: create servers' }
 ];
 
 function hashApiKey(token) {
@@ -81,24 +79,6 @@ function getApiServer(req, res) {
   const node = db.nodes.find(n => n.id === server.nodeId);
   if (!node) { res.status(404).json({ error: 'Node missing.' }); return null; }
   return { db, server, node };
-}
-
-function isSplitEligibleMinecraft(server) {
-  const game = String(server.game || '').toLowerCase();
-  const type = String((server.env && server.env.TYPE) || '').toUpperCase();
-  if (game === 'rust') return false;
-  if (['VELOCITY','BUNGEECORD','WATERFALL'].includes(type)) return false;
-  if (game.includes('velocity') || game.includes('bungee') || game.includes('waterfall')) return false;
-  return game.startsWith('minecraft') || ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','CUSTOM'].includes(type);
-}
-function normalizeProvisionLimits(body, plan) {
-  const pick = (k, fallback) => Number(body[k] || (plan && plan[k]) || fallback);
-  return {
-    memoryMb: Math.max(1024, pick('memoryMb', 2048)),
-    cpuLimit: Math.max(0.1, pick('cpuLimit', 1)),
-    storageLimitMb: Math.max(1024, pick('storageLimitMb', 10240)),
-    port: Number(body.port || 25565)
-  };
 }
 async function searchModrinth(query, gameVersion) {
   const facets = JSON.stringify([["project_type:mod","project_type:plugin"]]);
@@ -211,17 +191,19 @@ const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHe
 const apiLimiter = rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false });
 const writeLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false });
 
-function defaultDb() { return { users: [], nodes: [], servers: [], audit: [], apiKeys: [], plans: [], websiteApiKeys: [] }; }
-function readDb() {
-  if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify(defaultDb(), null, 2));
-  const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-  data.apiKeys = data.apiKeys || [];
-  data.plans = data.plans || [];
-  data.websiteApiKeys = data.websiteApiKeys || [];
+function defaultDb() { return { users: [], nodes: [], servers: [], audit: [], apiKeys: [], plans: [] }; }
+function normalizeDb(data) {
+  data = data || defaultDb();
   data.users = data.users || [];
   data.nodes = data.nodes || [];
   data.servers = data.servers || [];
-  for (const srv of (data.servers || [])) {
+  data.audit = data.audit || [];
+  data.apiKeys = data.apiKeys || [];
+  data.plans = data.plans || [];
+  for (const user of data.users) {
+    user.subdomainSlots = Number(user.subdomainSlots || (user.role === 'admin' ? 999 : 0));
+  }
+  for (const srv of data.servers) {
     srv.subusers = srv.subusers || [];
     srv.networkPorts = srv.networkPorts || [];
     srv.databases = srv.databases || [];
@@ -229,17 +211,58 @@ function readDb() {
   }
   return data;
 }
-function mirrorDbToPostgres(db) {
-  const databaseUrl = process.env.DATABASE_URL || '';
-  if (!databaseUrl || process.env.POSTGRES_MIRROR === 'false') return;
+function postgresEnabled() { return !!process.env.DATABASE_URL; }
+function psql(args, input) {
+  return execFileSync('psql', [process.env.DATABASE_URL, ...args], {
+    input,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+}
+function ensurePostgresState() {
+  if (!postgresEnabled()) return false;
   try {
-    execFileSync('psql', [databaseUrl, '-v', 'ON_ERROR_STOP=1', '-c', 'CREATE TABLE IF NOT EXISTS panel_state (id text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());'], { stdio: 'ignore', timeout: 10000 });
-    execFileSync('psql', [databaseUrl, '-v', 'ON_ERROR_STOP=1', '-c', `INSERT INTO panel_state (id, data, updated_at) VALUES ('main', '${JSON.stringify(db).replace(/'/g, "''")}'::jsonb, now()) ON CONFLICT (id) DO UPDATE SET data = excluded.data, updated_at = now();`], { stdio: 'ignore', timeout: 10000 });
+    psql(['-v', 'ON_ERROR_STOP=1', '-q', '-c', "CREATE TABLE IF NOT EXISTS panel_state (id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1), state JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"]);
+    const exists = psql(['-At', '-c', 'SELECT COUNT(*) FROM panel_state WHERE id = 1;']).trim();
+    if (exists !== '1') {
+      let seed = defaultDb();
+      if (fs.existsSync(DB_FILE)) {
+        try { seed = normalizeDb(JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))); } catch {}
+      }
+      const tag = `cap_${crypto.randomBytes(8).toString('hex')}`;
+      psql(['-v', 'ON_ERROR_STOP=1', '-q', '-c', `INSERT INTO panel_state (id, state, updated_at) VALUES (1, $${tag}$${JSON.stringify(seed)}$${tag}$::jsonb, NOW()) ON CONFLICT (id) DO NOTHING;`]);
+    }
+    return true;
   } catch (e) {
-    if (process.env.DEBUG_POSTGRES_MIRROR === 'true') console.warn('PostgreSQL mirror failed:', e.message);
+    console.error('[WARN] PostgreSQL is configured but unavailable. Falling back to JSON db.json:', e.message);
+    return false;
   }
 }
-function writeDb(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); mirrorDbToPostgres(db); }
+function readDb() {
+  if (ensurePostgresState()) {
+    try {
+      const raw = psql(['-At', '-c', 'SELECT state::text FROM panel_state WHERE id = 1;']).trim();
+      if (raw) return normalizeDb(JSON.parse(raw));
+    } catch (e) {
+      console.error('[WARN] Could not read PostgreSQL panel_state. Falling back to JSON db.json:', e.message);
+    }
+  }
+  if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify(defaultDb(), null, 2));
+  return normalizeDb(JSON.parse(fs.readFileSync(DB_FILE, 'utf8')));
+}
+function writeDb(db) {
+  db = normalizeDb(db);
+  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+  if (ensurePostgresState()) {
+    try {
+      const tag = `cap_${crypto.randomBytes(8).toString('hex')}`;
+      psql(['-v', 'ON_ERROR_STOP=1', '-q', '-c', `UPDATE panel_state SET state = $${tag}$${JSON.stringify(db)}$${tag}$::jsonb, updated_at = NOW() WHERE id = 1;`]);
+    } catch (e) {
+      console.error('[WARN] Could not write PostgreSQL panel_state. JSON db.json was still saved:', e.message);
+    }
+  }
+}
 function addAudit(action, details = {}) {
   const db = readDb();
   db.audit.unshift({ id: uuidv4(), action, details, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
@@ -250,11 +273,21 @@ async function bootstrapAdmin() {
   const db = readDb();
   const email = process.env.ADMIN_EMAIL || 'admin@example.com';
   const password = process.env.ADMIN_PASSWORD || 'ChangeMe123!';
-  if (!db.users.some(u => u.email === email)) {
-    db.users.push({ id: uuidv4(), email, name: 'Admin', role: 'admin', subdomainSlots: 999, passwordHash: await bcrypt.hash(password, 10), subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() });
-    writeDb(db);
+  const reset = String(process.env.RESET_ADMIN_ON_START || 'false').toLowerCase() === 'true';
+  let user = db.users.find(u => String(u.email || '').toLowerCase() === String(email).toLowerCase());
+  if (!user) {
+    user = { id: uuidv4(), email, name: 'Admin', role: 'admin', subdomainSlots: 999, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString() };
+    db.users.push(user);
     console.log(`Created admin user: ${email}`);
   }
+  if (reset || !user.passwordHash) {
+    user.passwordHash = await bcrypt.hash(password, 10);
+    console.log(`Admin password ${reset ? 'reset' : 'set'} for: ${email}`);
+  }
+  user.email = email;
+  user.role = 'admin';
+  user.subdomainSlots = Number(user.subdomainSlots || 999);
+  writeDb(db);
 }
 function requireLogin(req, res, next) { if (!req.session.userId) return res.redirect('/login'); next(); }
 function requireAdmin(req, res, next) {
@@ -862,17 +895,14 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
     }
     const node = db.nodes.find(n => n.id === (req.body.nodeId || '')) || db.nodes[0];
     if (!node) return res.status(400).json({ error: 'No node exists. Add a node first.' });
-    const plan = (db.plans || []).find(p => p.id === req.body.planId || p.name === req.body.planName) || null;
-    const limits = normalizeProvisionLimits(req.body, plan);
-    const memoryMb = limits.memoryMb;
-    const cpuLimit = limits.cpuLimit;
-    const storageLimitMb = limits.storageLimitMb;
-    const port = limits.port;
+    const memoryMb = Number(req.body.memoryMb || 2048);
+    const cpuLimit = Number(req.body.cpuLimit || 1);
+    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+    const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const name = req.body.serverName || `${user.name || 'server'}-${Date.now()}`;
-    const cfg = gameTypeConfig(req.body.gameType || req.body.serverType || req.body.type || 'PAPER');
-    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: cfg.game, image: req.body.image || cfg.image, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: cfg.envType, VERSION: req.body.gameVersion || req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name, CUSTOM_SERVER: req.body.customServerJar ? (String(req.body.customServerJar).startsWith('/') ? req.body.customServerJar : `/data/${req.body.customServerJar}`) : undefined } }, timeout: TIMEOUT * 60 });
-    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: cfg.game, ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
+    const created = await callAgent(node, '/servers', { method: 'POST', body: { name, game: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').game, image: req.body.image || gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').image, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, env: { EULA: 'TRUE', TYPE: gameTypeConfig(req.body.serverType || req.body.type || 'PAPER').envType, VERSION: req.body.version || 'LATEST', MEMORY: `${Math.floor(memoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: name, CUSTOM_SERVER: req.body.customServerJar ? (String(req.body.customServerJar).startsWith('/') ? req.body.customServerJar : `/data/${req.body.customServerJar}`) : undefined } }, timeout: TIMEOUT * 60 });
+    const panelServer = { id: uuidv4(), agentServerId: created.server.id, name, game: req.body.game || 'minecraft-paper', ownerId: user.id, nodeId: node.id, memoryMb, cpuLimit, storageLimitMb, ipAddress, port, subusers: [], networkPorts: [], databases: [], subdomains: [], createdAt: new Date().toISOString(), orderId: req.body.orderId || null, planId: req.body.planId || null };
     db.servers.push(panelServer);
     writeDb(db);
     res.json({ ok: true, user: { id: user.id, email: user.email, created: !!plainPassword, password: plainPassword }, server: panelServer });
@@ -880,50 +910,6 @@ app.post('/api/v1/provision/order', requireApiPermission('provision:server'), as
 });
 
 
-app.get('/api/v1/plans', requireApiPermission('provision:plans'), (req, res) => { const db = readDb(); res.json({ ok: true, plans: db.plans || [] }); });
-app.get('/api/v1/provision/health', requireApiPermission('provision:server'), (req, res) => {
-  res.json({ ok: true, user: { id: req.apiUser.id, email: req.apiUser.email, role: req.apiUser.role }, permissions: req.apiKey.permissions || [] });
-});
-app.post('/api/v1/website/create-server', requireApiPermission('provision:server'), (req, res, next) => {
-  req.url = '/api/v1/provision/order';
-  next();
-});
-
-
-
-
-app.post('/servers/:id/split', requireLogin, writeLimiter, async (req, res) => {
-  const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
-  const db = ctx.db; const server = ctx.server; const node = ctx.node;
-  try {
-    if (!isSplitEligibleMinecraft(server)) throw new Error('Only normal Minecraft servers can be split. Proxies and Rust cannot be split.');
-    const splitMemoryMb = Number(req.body.memoryMb || 0);
-    const splitCpu = Number(req.body.cpuLimit || 0);
-    const splitStorageMb = Number(req.body.storageLimitMb || 0);
-    if (splitMemoryMb < 1024) throw new Error('Split server must have at least 1024MB RAM.');
-    if ((Number(server.memoryMb || 0) - splitMemoryMb) < 1024) throw new Error('The main server must keep at least 1024MB RAM.');
-    if (splitCpu <= 0 || splitStorageMb < 1024) throw new Error('CPU must be over 0 and storage must be at least 1024MB.');
-    if ((Number(server.cpuLimit || 0) - splitCpu) < 0.1) throw new Error('The main server does not have enough CPU to split.');
-    if ((Number(server.storageLimitMb || 0) - splitStorageMb) < 1024) throw new Error('The main server must keep at least 1024MB storage.');
-    const newName = String(req.body.name || `${server.name}-split`).trim();
-    const port = Number(req.body.port || 0);
-    if (!port) throw new Error('Pick a public port for the split server.');
-    const cfg = gameTypeConfig(req.body.serverType || (server.env && server.env.TYPE) || 'PAPER');
-    const created = await callAgent(node, '/servers', { method: 'POST', timeout: TIMEOUT * 60, body: {
-      name: newName, game: cfg.game, image: cfg.image, memoryMb: splitMemoryMb, cpuLimit: splitCpu, storageLimitMb: splitStorageMb,
-      ipAddress: node.publicIp || server.ipAddress || nodeHostFromUrl(node.url), port,
-      env: { EULA: 'TRUE', TYPE: cfg.envType, VERSION: req.body.version || (server.env && server.env.VERSION) || 'LATEST', MEMORY: `${Math.floor(splitMemoryMb * 0.85)}M`, ENABLE_RCON: 'true', RCON_PASSWORD: 'minecraft', MOTD: newName }
-    }});
-    server.memoryMb = Number(server.memoryMb) - splitMemoryMb;
-    server.cpuLimit = Number(server.cpuLimit) - splitCpu;
-    server.storageLimitMb = Number(server.storageLimitMb) - splitStorageMb;
-    try { await callAgent(node, `/servers/${server.agentServerId}/resources`, { method: 'POST', timeout: TIMEOUT * 10, body: { memoryMb: server.memoryMb, cpuLimit: server.cpuLimit, storageLimitMb: server.storageLimitMb, port: server.port } }); } catch (e) { req.flash('error', `Split server created, but resizing main server failed: ${e.message}`); }
-    db.servers.push({ id: uuidv4(), agentServerId: created.server.id, name: newName, game: cfg.game, ownerId: server.ownerId, nodeId: node.id, memoryMb: splitMemoryMb, cpuLimit: splitCpu, storageLimitMb: splitStorageMb, ipAddress: node.publicIp || server.ipAddress || nodeHostFromUrl(node.url), port, subusers: [], networkPorts: [], databases: [], subdomains: [], parentServerId: server.id, createdAt: new Date().toISOString() });
-    writeDb(db);
-    req.flash('success', `Split server ${newName} created and resources removed from ${server.name}.`);
-  } catch (e) { req.flash('error', e.message); }
-  res.redirect(`/servers/${server.id}#split`);
-});
 
 app.post('/servers/:id/delete', requireLogin, async (req, res) => {
   const ctx = getOwnedServer(req, res); if (ctx.error) return ctx.error();
@@ -1061,12 +1047,10 @@ app.post('/admin/servers', requireLogin, requireAdmin, async (req, res) => {
   const owner = db.users.find(u => u.id === req.body.ownerId);
   if (!node || !owner) { req.flash('error', 'Pick a valid node and owner.'); return res.redirect('/admin'); }
   try {
-    const plan = (db.plans || []).find(p => p.id === req.body.planId || p.name === req.body.planName) || null;
-    const limits = normalizeProvisionLimits(req.body, plan);
-    const memoryMb = limits.memoryMb;
-    const cpuLimit = limits.cpuLimit;
-    const storageLimitMb = limits.storageLimitMb;
-    const port = limits.port;
+    const memoryMb = Number(req.body.memoryMb || 2048);
+    const cpuLimit = Number(req.body.cpuLimit || 1);
+    const storageLimitMb = Number(req.body.storageLimitMb || 10240);
+    const port = Number(req.body.port || 25565);
     const ipAddress = req.body.ipAddress || node.publicIp || nodeHostFromUrl(node.url);
     const version = req.body.version || 'LATEST';
     const cfg = gameTypeConfig(req.body.serverType || req.body.type || 'PAPER');

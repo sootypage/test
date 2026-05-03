@@ -53,7 +53,6 @@ function cleanConsoleLogs(logs) {
   return String(logs || '')
     .split(/\r?\n/)
     .filter(line => !line.includes('ServerMain WARN Advanced terminal features are not available in this environment'))
-    .filter(line => !line.includes('main WARN Advanced terminal features are not available in this environment'))
     .filter(line => !line.includes('Stopping with rcon-cli'))
     .filter(line => !line.includes('Failed to stop using rcon-cli'))
     .join('\n');
@@ -338,8 +337,6 @@ app.post('/servers', auth, async (req, res) => {
   const memoryMb = Number(req.body.memoryMb || 2048);
   const cpuLimit = Number(req.body.cpuLimit || 1);
   const storageLimitMb = Number(req.body.storageLimitMb || 10240);
-  if (memoryMb < 1024) return res.status(400).json({ error: 'Servers must have at least 1024MB RAM.' });
-  if (storageLimitMb < 1024) return res.status(400).json({ error: 'Servers must have at least 1024MB storage.' });
   const ipAddress = req.body.ipAddress || '';
   const containerName = `amp-${safeName(name)}-${serverId.slice(0, 8)}`;
   const env = Object.assign(defaultEnv(memoryMb, name), req.body.env || {});

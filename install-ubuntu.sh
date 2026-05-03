@@ -95,7 +95,7 @@ if [[ "$CURRENT_DIR" != "$INSTALL_DIR" ]]; then
   if [[ -f "$INSTALL_DIR/panel/.env" ]]; then cp "$INSTALL_DIR/panel/.env" /tmp/custom-amp-panel.env.bak; fi
   if [[ -f "$INSTALL_DIR/agent/.env" ]]; then cp "$INSTALL_DIR/agent/.env" /tmp/custom-amp-agent.env.bak; fi
   if [[ -d "$INSTALL_DIR/panel/data" ]]; then sudo mkdir -p /tmp/custom-amp-panel-data.bak && sudo cp -a "$INSTALL_DIR/panel/data/." /tmp/custom-amp-panel-data.bak/; fi
-  sudo rsync -a --delete --exclude 'panel/.env' --exclude 'agent/.env' --exclude 'panel/data' "$CURRENT_DIR/" "$INSTALL_DIR/"
+  sudo rsync -a --exclude 'panel/.env' --exclude 'agent/.env' --exclude 'panel/data' "$CURRENT_DIR/" "$INSTALL_DIR/"
   sudo chown -R "$USER:$USER" "$INSTALL_DIR"
   if [[ -f /tmp/custom-amp-panel.env.bak ]]; then mv /tmp/custom-amp-panel.env.bak "$INSTALL_DIR/panel/.env"; fi
   if [[ -f /tmp/custom-amp-agent.env.bak ]]; then mv /tmp/custom-amp-agent.env.bak "$INSTALL_DIR/agent/.env"; fi
@@ -108,6 +108,22 @@ if [[ "$INSTALL_PANEL" == true ]]; then
   cd panel
   npm install
   cp -n .env.example .env || true
+
+  DB_NAME="custom_amp_panel"
+  DB_USER="custom_amp"
+  EXISTING_DB_URL="$(get_env_value .env DATABASE_URL || true)"
+  if [[ -z "$EXISTING_DB_URL" ]]; then
+    DB_PASS="$(random_secret)"
+    info "Setting up PostgreSQL database for panel data..."
+    sudo systemctl enable --now postgresql
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || sudo -u postgres psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS panel_state (id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1), state JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()); GRANT ALL PRIVILEGES ON TABLE panel_state TO ${DB_USER}; INSERT INTO panel_state (id, state) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;"
+    write_env_value .env DATABASE_URL "postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}"
+  else
+    info "DATABASE_URL already exists, keeping existing PostgreSQL settings."
+  fi
+
   write_env_value .env PORT "$PANEL_PORT"
   write_env_value .env SESSION_SECRET "$(get_env_value .env SESSION_SECRET || random_secret)"
   write_env_value .env BRAND_NAME "$PANEL_NAME"
@@ -117,18 +133,6 @@ if [[ "$INSTALL_PANEL" == true ]]; then
   write_env_value .env DATA_DIR "./data"
   write_env_value .env PANEL_TO_AGENT_TOKEN "$SHARED_TOKEN"
   write_env_value .env NODE_API_TIMEOUT_MS "10000"
-
-  info "Setting up PostgreSQL database for panel state mirror..."
-  DB_NAME="custom_amp_panel"
-  DB_USER="custom_amp"
-  DB_PASS="$(get_env_value .env POSTGRES_PASSWORD || random_secret)"
-  sudo systemctl enable --now postgresql || true
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
-  sudo -u postgres psql -d "${DB_NAME}" -c "CREATE TABLE IF NOT EXISTS panel_state (id text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());" >/dev/null
-  write_env_value .env DATABASE_URL "postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}"
-  write_env_value .env POSTGRES_MIRROR "true"
-  write_env_value .env POSTGRES_PASSWORD "$DB_PASS"
   cd ..
   sudo cp docs/systemd-panel.service /etc/systemd/system/custom-amp-panel.service
   sudo systemctl daemon-reload

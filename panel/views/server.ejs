@@ -43,7 +43,6 @@
   <button class="tab-btn" data-tab="backups">Backups</button>
   <button class="tab-btn" data-tab="addons">Plugins / Mods</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
-  <button class="tab-btn" data-tab="split">Split server</button>
   <button class="tab-btn" data-tab="subusers">Subusers</button>
   <button class="tab-btn" data-tab="network">Network</button>
   <button class="tab-btn" data-tab="subdomains">Subdomains</button>
@@ -457,40 +456,6 @@
   </div>
 </section>
 
-
-
-<section id="tab-split" class="tab-panel">
-  <div class="card">
-    <h2>Split this Minecraft server</h2>
-    <p class="muted">Create a new Minecraft server using RAM, CPU, and storage taken from this main server. The new split server must have at least 1024MB RAM, and the main server must keep at least 1024MB RAM.</p>
-    <div class="resource-grid">
-      <div><strong><%= server.memoryMb || 0 %> MB</strong><span>Main RAM now</span></div>
-      <div><strong><%= server.cpuLimit || 0 %></strong><span>Main CPU now</span></div>
-      <div><strong><%= server.storageLimitMb || 0 %> MB</strong><span>Main storage now</span></div>
-    </div>
-    <form method="post" action="/servers/<%= server.id %>/split" class="form settings-grid" onsubmit="return confirm('Create split server and remove these resources from the main server?')">
-      <label>New server name</label>
-      <input name="name" value="<%= server.name %>-split" required>
-      <label>Server type</label>
-      <select name="serverType">
-        <% ['PAPER','PURPUR','FABRIC','FORGE','NEOFORGE','VANILLA','CUSTOM'].forEach(v => { %>
-          <option value="<%= v %>"><%= v %></option>
-        <% }) %>
-      </select>
-      <label>Game version</label>
-      <input name="version" value="<%= s && s.version ? s.version : 'LATEST' %>" placeholder="LATEST or 1.21.11">
-      <label>New public port</label>
-      <input name="port" type="number" min="1" max="65535" placeholder="25571" required>
-      <label>RAM to take (MB)</label>
-      <input name="memoryMb" type="number" min="1024" step="128" value="1024" required>
-      <label>CPU to take</label>
-      <input name="cpuLimit" type="number" min="0.1" step="0.1" value="1" required>
-      <label>Storage to take (MB)</label>
-      <input name="storageLimitMb" type="number" min="1024" step="512" value="5120" required>
-      <div class="span"><button class="primary">Split server</button></div>
-    </form>
-  </div>
-</section>
 
 <section id="tab-subusers" class="tab-panel">
   <div class="card">

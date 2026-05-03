@@ -4,6 +4,7 @@ APP_DIR="/opt/custom-amp/custom-amp-ubuntu-panel"
 REPO_ZIP_URL="${REPO_ZIP_URL:-https://github.com/sootypage/test/archive/refs/heads/main.zip}"
 TMP_DIR="/tmp/custom-amp-safe-update"
 TMP_ZIP="/tmp/custom-amp-main.zip"
+cd /tmp
 echo "[1/8] Installing needed tools..."
 sudo apt update
 sudo apt install -y curl unzip rsync
